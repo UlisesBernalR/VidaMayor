@@ -9,6 +9,6 @@
    La clave pública NO es secreta: está pensada para ir dentro de la app. Lo que protege los datos
    son las reglas de la base de datos (supabase/esquema.sql). */
 window.VIDAMAYOR_NUBE = {
-  url: '',    // Ej. 'https://abcdefghijklmnop.supabase.co'
-  clave: '',  // Ej. 'eyJhbGciOi…' (anon) o 'sb_publishable_…'
+  url: 'https://tdtqdyflvgzjnxjjqjxs.supabase.co',    // Ej. 'https://abcdefghijklmnop.supabase.co'
+  clave: 'sb_publishable_QL-JOJJ5spe4btYfzPAxZg_0qpm6__g',  // Ej. 'eyJhbGciOi…' (anon) o 'sb_publishable_…'
 };
