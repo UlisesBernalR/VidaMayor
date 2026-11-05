@@ -13,19 +13,19 @@ Está hecha con **HTML, CSS y JavaScript** y se empaqueta como **APK** con [Capa
 | **Inicio** | Saludo, próximo medicamento (con botón *Ya lo tomé*), próxima cita, estado del día, llamada rápida y botón de emergencia |
 | **Agenda** | Calendario sencillo con citas, actividades y recordatorios |
 | **Medicinas** | Nombre, dosis, hora, confirmar toma, deshacer y pendientes |
-| **Familia** | Familiares con foto, teléfono y botón *Llamar* |
-| **SOS / Emergencia** | Botón grande, confirmación antes de enviar, llamar al 911, mensaje/WhatsApp a la familia con la ubicación |
-| **Ubicación** | Compartir ubicación (GPS del teléfono), última ubicación y quién puede verla |
+| **Familia** | Contactos de emergencia con foto, teléfono y botón *Llamar* |
+| **SOS / Emergencia** | Botón grande, confirmación antes de enviar, llamar al 911, mensaje/WhatsApp a los contactos con la ubicación y aviso automático a la familia conectada |
+| **Ubicación** | Compartir ubicación (GPS del teléfono), última ubicación y quién puede verla (la familia conectada que autorizaste) |
 | **Mi perfil** | Datos, médico de confianza, información médica, **privacidad y permisos**, notificaciones y tamaño de letra |
 | **Avisos** | Lista de lo pendiente: *"Hora de tomar medicamento"*, *"No se ha confirmado tu medicamento de las 10:00 a. m."* |
-| **Panel familiar** | Lo que ve un familiar autorizado: medicinas confirmadas/pendientes, citas, ubicación y emergencias |
-| **Familia conectada** | (con la nube activada) Un código une el celular de la persona con el de su familiar; la alerta de emergencia le llega al otro teléfono. Ver [GUIA-SUPABASE.md](GUIA-SUPABASE.md) |
+| **Familia conectada** | Un código une el celular de la persona con el de su familiar, que lo escribe en su propio teléfono con *Soy familiar*. La persona decide a quién autoriza. |
+| **Panel familiar** | Lo que ve el familiar en su celular: medicinas confirmadas/pendientes, citas, ubicación y emergencias (según lo que la persona permita). Requiere la nube: ver [GUIA-SUPABASE.md](GUIA-SUPABASE.md) |
 
 Diseño *Soft & Friendly*: letra grande (con 3 tamaños), alto contraste, botones amplios y pocos colores.
 
 ---
 
-## 2. Ver la app en el navegador (sin compilar nada)
+## 2. Probar cambios en el navegador (para quien programa)
 
 Necesitas [Node.js 22](https://nodejs.org) o más nuevo.
 
@@ -75,7 +75,7 @@ Para abrirlo en Android Studio y probarlo en un emulador: `npm run android:open`
 
 ### Si algo falla
 
-> La interfaz y la lógica se probaron en navegador (65 pruebas) y los plugins del teléfono se probaron con simulaciones, pero **el APK no se pudo compilar donde se creó el proyecto** (ahí no hay SDK de Android). Si el flujo de GitHub falla, abre el paso en rojo, copia el error y con eso se corrige rápido.
+> La interfaz y la lógica tienen más de 130 pruebas automáticas. El APK se compila en GitHub Actions: si el flujo falla, abre el paso en rojo, copia el error y con eso se corrige rápido.
 
 | Mensaje | Qué hacer |
 |---|---|
@@ -86,28 +86,27 @@ Para abrirlo en Android Studio y probarlo en un emulador: `npm run android:open`
 
 ---
 
-## 4. ¿Qué es real y qué es simulado?
+## 4. Cómo funciona
 
-**Funciona de verdad en el teléfono**
-- Guardado de medicinas, citas, familiares y ajustes (se queda en el teléfono).
-- Avisos de medicinas (a la hora y otro a los 30 min si no confirmas) y de citas (1 hora antes), aunque la app esté cerrada.
+**En el teléfono de la persona**
+- Medicinas, citas, contactos de emergencia y ajustes se guardan en el teléfono.
+- Avisos de medicinas (a la hora y otro a los 30 min si no confirma) y de citas (1 hora antes), aunque la app esté cerrada.
 - GPS para la ubicación, llamadas (`tel:`), mensajes (`sms:`) y WhatsApp con un toque, y mapa.
 
-**Funciona de verdad entre dos celulares (si activas la nube con [GUIA-SUPABASE.md](GUIA-SUPABASE.md))**
+**Entre dos celulares (con la nube de [GUIA-SUPABASE.md](GUIA-SUPABASE.md))**
 - La persona crea un código; su familiar lo escribe en su propio teléfono y la persona decide si lo autoriza.
 - El familiar ve, casi al instante, las medicinas confirmadas, las citas del día, la ubicación (si se comparte) y las alertas de emergencia.
 - El filtro de privacidad se aplica **en el servidor**: lo que la persona no comparte nunca sale de la base de datos.
 - Si no hay internet al pedir ayuda, la alerta espera y se envía sola cuando vuelve la conexión.
 
-**Todavía simulado (está marcado en pantalla)**
-- Sin la nube configurada, el panel familiar es una simulación en el mismo teléfono.
-- *Cambiar contraseña* y las cuentas con correo (hoy la conexión es por código y autorización).
-- El aviso al familiar cuando **su app está cerrada** (ver siguiente fase): hoy se entera mientras la app está abierta o recién usada.
+**Todavía no incluye**
+- Avisar al familiar cuando **su app está cerrada** (necesita notificaciones *push*): hoy se entera mientras la app está abierta o recién usada.
+- Cuentas con correo o teléfono: hoy la conexión es por código y autorización.
 
-### Siguiente fase
+### Antes de publicarla en una tienda
 1. Notificaciones *push* (Firebase Cloud Messaging) para avisar al familiar aunque su app esté cerrada.
-2. Cuentas reales con Supabase Auth (correo o teléfono) y límites contra abusos, antes de publicarla en Google Play.
-3. Aviso de privacidad: son datos de salud, así que una app publicada necesita consentimiento y política de privacidad.
+2. Cuentas reales con Supabase Auth y límites contra abusos.
+3. Política de privacidad y consentimiento: son datos de salud y ubicación.
 
 ---
 
@@ -152,4 +151,4 @@ Para cambiar el nombre o el ID de la app edita `capacitor.config.json` **antes**
 
 ---
 
-*Versiones: Capacitor 8 (Node 22+, JDK 21, Android SDK 36). Los datos de ejemplo usan teléfonos ficticios.*
+*Versiones: Capacitor 8 (Node 22+, JDK 21, Android SDK 36).*

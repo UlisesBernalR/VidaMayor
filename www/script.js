@@ -1,7 +1,8 @@
 /* VidaMayor — script.js
    App para acompañar a adultos mayores (medicinas, citas, familia, emergencia y ubicación).
-   Funciona dentro de Capacitor (el APK) y también en el navegador para probarla.
-   Los datos se guardan SOLO en el teléfono (localStorage). Lo que es demostración está marcado en pantalla. */
+   Funciona dentro de Capacitor (la app de Android).
+   Los datos se guardan en el teléfono (localStorage). Solo si la persona conecta a su familia
+   se sube un resumen del día a la nube (Supabase), y únicamente lo que ella permite. */
 (() => {
 'use strict';
 
@@ -103,9 +104,9 @@ function defaults() {
     meds: [],       // { id, name, dose, time:'08:00', notes }
     log: {},        // { '2026-11-05': { medId: '08:05' } }  -> medicinas confirmadas
     appts: [],      // { id, type, title, place, date:'2026-11-05', time:'16:00' }
-    family: [],     // { id, name, relation, phone, photo, authorized }
+    family: [],     // contactos de emergencia: { id, name, relation, phone, photo }
     location: null, // { lat, lng, acc, at }
-    alerts: [],     // { id, at, loc, resolvedAt, notified:[ids], cloud, locSent, closedSent }
+    alerts: [],     // { id, at, loc, resolvedAt, cloud, locSent, closedSent }
     nube: { rol: '', codigo: '', llave: '', token: '', miembro: '', adulto: '', nombre: '', ultimaAlerta: '' }, // rol: 'adulto' | 'familiar'
   };
 }
@@ -114,7 +115,8 @@ function merge(base, saved) {
   for (const k of Object.keys(base)) {
     const b = base[k], s = saved[k];
     if (s === undefined) continue;
-    base[k] = (b && typeof b === 'object' && !Array.isArray(b) && s && typeof s === 'object') ? merge(b, s) : s;
+    // Un objeto vacío por defecto (como `log`) es un diccionario libre: se toma tal cual lo guardado
+    base[k] = (b && typeof b === 'object' && !Array.isArray(b) && Object.keys(b).length && s && typeof s === 'object') ? merge(b, s) : s;
   }
   return base;
 }
@@ -137,38 +139,11 @@ function save() {
   scheduleReminders();
   scheduleSync();
 }
-function seedDemo(name) {
-  const now = new Date();
-  const d = (n) => dstr(addDays(now, n));
-  state.profile.name = name || 'María';
-  state.profile.age = '72';
-  state.profile.doctorName = 'Dra. Ramírez';
-  state.profile.doctorPhone = '55 0000 0003';
-  state.meds = [
-    { id: uid(), name: 'Losartán', dose: '1 tableta de 50 mg', time: '08:00', notes: 'Después del desayuno' },
-    { id: uid(), name: 'Metformina', dose: '1 tableta', time: '12:00', notes: 'Con la comida' },
-    { id: uid(), name: 'Vitamina D', dose: '1 cápsula', time: '20:00', notes: '' },
-  ];
-  state.appts = [
-    { id: uid(), type: 'cita', title: 'Consulta con la Dra. Ramírez', place: 'Clínica Santa María', date: d(0), time: '16:00' },
-    { id: uid(), type: 'recordatorio', title: 'Llevar estudios de laboratorio', place: '', date: d(1), time: '09:00' },
-    { id: uid(), type: 'cita', title: 'Análisis de laboratorio', place: 'Laboratorio Central', date: d(3), time: '10:30' },
-    { id: uid(), type: 'actividad', title: 'Caminata con las vecinas', place: 'Parque del barrio', date: d(6), time: '17:00' },
-  ];
-  state.family = [
-    { id: uid(), name: 'Carlos Hernández', relation: 'Hijo', phone: '55 0000 0001', photo: '', authorized: true },
-    { id: uid(), name: 'Laura Hernández', relation: 'Hija', phone: '55 0000 0002', photo: '', authorized: true },
-    { id: uid(), name: 'Rosa Medina', relation: 'Vecina', phone: '55 0000 0004', photo: '', authorized: false },
-  ];
-  // Para que el panel familiar se vea con vida: si ya pasaron las 8, la primera medicina está confirmada
-  if (now.getHours() >= 8) state.log[d(0)] = { [state.meds[0].id]: '08:05' };
-}
 
 /* ── Consultas sobre los datos ── */
 const medById = (id) => state.meds.find((m) => m.id === id);
 const isTaken = (medId, date = dstr()) => !!(state.log[date] && state.log[date][medId]);
 const activeAlert = () => state.alerts.find((a) => !a.resolvedAt);
-const authorizedFamily = () => state.family.filter((f) => f.authorized);
 const apptsOn = (date) => state.appts.filter((a) => a.date === date).sort(byTime);
 function upcomingAppts(now = new Date()) {
   return state.appts.map((a) => ({ ...a, when: at(a.date, a.time) })).filter((a) => a.when >= now).sort((a, b) => a.when - b.when);
@@ -193,8 +168,7 @@ const ui = {
   view: 'inicio', prev: 'inicio',
   cal: { y: now0.getFullYear(), m: now0.getMonth() },
   selDay: dstr(now0),
-  mode: 'adulto',   // 'adulto' | 'familiar' (vista de familiar, simulada)
-  asId: '',
+  mode: 'adulto',   // 'adulto' | 'familiar' (quien se conectó con un código y solo mira)
   fired: new Set(),
 };
 
@@ -304,17 +278,6 @@ async function syncNative() {
     if (list.length) await LN.schedule({ notifications: list });
   } catch (e) { console.warn('Avisos:', e); }
 }
-async function testNotification() {
-  const title = 'Aviso de prueba', body = 'Así se verán tus recordatorios de VidaMayor.';
-  const LN = plug('LocalNotifications');
-  if (isNative && LN) {
-    await LN.schedule({ notifications: [{ id: 999999, title, body, schedule: { at: new Date(Date.now() + 4000) }, channelId: CHANNEL, smallIcon: 'ic_stat_vidamayor', iconColor: '#2E7D74' }] });
-    toast('Te llegará un aviso en unos segundos. Puedes salir de la app.', 'ok');
-  } else {
-    webNotify(title, body);
-    toast('Aviso de prueba enviado.', 'ok');
-  }
-}
 /** Mientras la app está abierta, avisa cuando llega la hora */
 function tickDue() {
   if (!state.onboarded || state.loggedOut) return;
@@ -373,7 +336,6 @@ const bindFld = (label, bind, value, { type = 'text', ph = '', ac = 'off' } = {}
   `<label class="field"><span>${label}</span><input class="input" type="${type}" data-bind="${bind}" value="${esc(value)}" placeholder="${esc(ph)}" autocomplete="${ac}"></label>`;
 const sw = (id, title, desc, checked) =>
   `<div class="switch-row"><div class="txt"><div class="t">${esc(title)}</div>${desc ? `<div class="d">${esc(desc)}</div>` : ''}</div><label class="switch"><input type="checkbox" data-switch="${id}" ${checked ? 'checked' : ''} aria-label="${esc(title)}"><span class="track"></span></label></div>`;
-const simNote = (text) => `<div class="banner sim">${I('info')}<div>${text}</div></div>`;
 
 let toastTimer = null;
 function toast(msg, kind = '') {
@@ -473,12 +435,6 @@ function pickPhoto() {
 /* ═══════════════════════════════════════════════════════════
    7. Avisos y estado del día
    ═══════════════════════════════════════════════════════════ */
-function familyNote() {
-  const s = state.settings;
-  const names = authorizedFamily().map((f) => firstName(f.name));
-  if (!s.notif.followUp || !s.privacy.meds || !names.length) return '';
-  return ` · Se avisaría a ${names.slice(0, 2).join(' y ')} (simulación)`;
-}
 function computeNotices(now = new Date()) {
   const out = [];
   const act = activeAlert();
@@ -486,7 +442,7 @@ function computeNotices(now = new Date()) {
   for (const m of [...state.meds].sort(byTime)) {
     const s = medStatus(m, now);
     const sub = `${m.name}${m.dose ? ` · ${m.dose}` : ''}`;
-    if (s.key === 'late') out.push({ kind: 'warn', icon: 'alert', title: `No se ha confirmado tu medicamento de las ${t12(m.time)}`, sub: sub + familyNote(), medId: m.id });
+    if (s.key === 'late') out.push({ kind: 'warn', icon: 'alert', title: `No se ha confirmado tu medicamento de las ${t12(m.time)}`, sub, medId: m.id });
     else if (s.key === 'due') out.push({ kind: 'due', icon: 'pill', title: `${t12(m.time)} — Hora de tomar medicamento`, sub, medId: m.id });
     else if (s.key === 'soon' && s.due - now <= 3600000) out.push({ kind: 'info', icon: 'pill', title: `${t12(m.time)} — Medicamento ${rel(s.due - now)}`, sub });
   }
@@ -693,7 +649,7 @@ function limpiarTodo(aviso = '') {
 /* ── Tarjeta "Familia conectada" (en Mi perfil) ── */
 function nubeCard() {
   const head = `<div class="card-head">${I('users')}Familia conectada</div>`;
-  if (!nubeOn()) return `<section class="card">${head}<p class="small muted">Con internet, tu familia podría ver cómo estás desde su propio celular. Esta versión de la app todavía no tiene la nube activada.</p></section>`;
+  if (!nubeOn()) return `<section class="card">${head}<p class="small muted">Esta función no está disponible por el momento.</p></section>`;
   if (!esAdulto()) return `<section class="card">${head}
       <p class="small muted">Crea un código y compártelo con tu familia. Ellos instalan VidaMayor, eligen "Soy familiar" y lo escriben. Tú decides a quién autorizar.</p>
       <button class="btn btn-primary btn-block" style="margin-top:.7rem" data-act="crearFamilia">${I('users')} Conectar a mi familia</button></section>`;
@@ -816,7 +772,7 @@ function cardDayStatus(now) {
   </section>`;
 }
 function quickTiles() {
-  const c = authorizedFamily().find((f) => f.phone) || state.family.find((f) => f.phone);
+  const c = state.family.find((f) => f.phone);
   const call = c
     ? `<a class="tile sky" href="tel:${digits(c.phone)}">${I('phone')}Llamar a ${esc(firstName(c.name))}<small>${esc(c.relation || 'Familiar')}</small></a>`
     : `<button class="tile sky" data-act="go" data-view="familia">${I('users')}Agregar familiar<small>Para llamar rápido</small></button>`;
@@ -900,14 +856,13 @@ VIEWS.medicinas = () => {
   </div>`;
 };
 
-/* ── Familia ── */
+/* ── Familia (contactos de emergencia) ── */
 VIEWS.familia = () => {
   const cards = state.family.length ? state.family.map((f) => `
     <article class="card">
       <div class="family-row">${avatar(f.name, f.photo, 'lg')}
         <div class="grow"><div class="item-title" style="font-size:1.15rem">${esc(f.name)}</div>
-          <div class="item-sub">${esc(f.relation || 'Familiar')}${f.phone ? ` · ${esc(f.phone)}` : ''}</div>
-          <div style="margin-top:.35rem">${f.authorized ? `<span class="chip ok">${I('shield', 'sm')} Autorizado</span>` : `<span class="chip neutral">${I('lock', 'sm')} Sin acceso a mi información</span>`}</div></div>
+          <div class="item-sub">${esc(f.relation || 'Familiar')}${f.phone ? ` · ${esc(f.phone)}` : ''}</div></div>
       </div>
       <div class="btn-row" style="margin-top:.8rem">
         ${f.phone ? `<a class="btn btn-primary" href="tel:${digits(f.phone)}">${I('phone')} Llamar</a>` : ''}
@@ -915,12 +870,15 @@ VIEWS.familia = () => {
       </div>
     </article>`).join('')
     : `<div class="card"><div class="empty">${I('users')}<p>Agrega a tus familiares para llamarles con un toque.</p></div></div>`;
+  const conectar = nubeOn() ? `<section class="card tint-lav"><div class="card-head">${I('eye')}Que tu familia vea cómo estás</div>
+      <p class="small muted">${esAdulto() ? 'Tu familia conectada ve tus medicinas, citas y ubicación, según lo que tú permitas.' : 'Conecta a tu familia para que vean desde su celular si ya tomaste tus medicinas.'}</p>
+      <button class="btn btn-line btn-block" style="margin-top:.6rem" data-act="go" data-view="perfil">${esAdulto() ? 'Administrar familia conectada' : 'Conectar a mi familia'}</button></section>` : '';
   return `${topbar()}<div class="page">
     <h1 class="page-title">Familia</h1>
-    <p class="lead">Las personas autorizadas pueden ver tu estado en su panel.</p>
+    <p class="lead">Tus contactos de emergencia: les llamas con un toque y reciben tus avisos.</p>
     ${cards}
     <button class="btn btn-primary btn-block btn-xl fab-row" data-act="addFamily">${I('plus')} Agregar familiar</button>
-    <button class="btn btn-line btn-block" style="margin-top:.7rem" data-act="enterFamily">${I('eye')} Ver cómo lo ve mi familiar</button>
+    ${conectar}
   </div>`;
 };
 
@@ -946,15 +904,15 @@ VIEWS.emergencia = () => {
       <p class="lead">Si necesitas ayuda, presiona el botón. Antes de enviar te pediremos confirmación.</p>
       <div class="sos-round-wrap"><button class="sos-round" data-act="askSOS" aria-label="Pedir ayuda de emergencia">${I('alert')}EMERGENCIA</button></div>
       <a class="btn btn-line btn-block btn-xl" href="tel:911">${I('phone')} Llamar al 911</a>
-      ${esAdulto()
-        ? '<p class="small muted" style="margin-top:1rem;text-align:center">Al pedir ayuda, el aviso le llega a tu familia conectada y autorizada.</p>'
-        : simNote(nubeOn()
-          ? '<strong>Modo demostración.</strong> El aviso queda registrado en este teléfono y puedes mandar mensajes con un toque. Para que le llegue solo a otro celular, conecta a tu familia en Mi perfil → Familia conectada.'
-          : '<strong>Modo demostración.</strong> El aviso queda registrado en el panel familiar de este teléfono y puedes mandar mensajes con un toque. El envío automático a otros celulares necesita la nube (ver GUIA-SUPABASE.md).')}
+      <p class="small muted" style="margin-top:1rem;text-align:center">${esAdulto()
+        ? 'Al pedir ayuda, el aviso le llega a tu familia conectada y autorizada.'
+        : nubeOn()
+          ? 'Al pedir ayuda podrás avisar a tus contactos con un toque. Conecta a tu familia en Mi perfil para que el aviso les llegue solo.'
+          : 'Al pedir ayuda podrás avisar a tus contactos con un toque.'}</p>
       ${history}
     </div>`;
   }
-  const people = act.notified.map((id) => state.family.find((f) => f.id === id)).filter(Boolean);
+  const people = state.family;
   const text = sosText(act);
   const rows = people.length ? people.map((f) => `
       <div class="item" style="display:block">
@@ -964,7 +922,7 @@ VIEWS.emergencia = () => {
           <a class="btn btn-soft btn-sm" href="sms:${digits(f.phone)}?body=${encodeURIComponent(text)}">${I('msg')} SMS</a>
           <a class="btn btn-soft btn-sm" href="${waLink(f.phone, text)}" target="_blank" rel="noopener">WhatsApp</a>
         </div></div>`).join('')
-    : `<p class="muted" style="padding:.6rem 0">No tienes familiares autorizados. Llama al 911 o agrega familiares en la sección Familia.</p>`;
+    : `<p class="muted" style="padding:.6rem 0">No tienes contactos de emergencia. Llama al 911 o agrégalos en la sección Familia.</p>`;
   const loc = act.loc
     ? `<div class="item"><span class="icon-bubble danger">${I('pin')}</span><div class="grow"><div class="item-title">Ubicación incluida</div><div class="item-sub">Precisión aproximada: ${act.loc.acc || '?'} m</div></div><a class="btn btn-soft btn-sm" href="https://www.google.com/maps?q=${act.loc.lat},${act.loc.lng}" target="_blank" rel="noopener">Ver mapa</a></div>`
     : `<div class="item"><span class="icon-bubble">${I('pin')}</span><div class="grow"><div class="item-title">${state.settings.privacy.location ? 'Buscando tu ubicación…' : 'Ubicación no incluida'}</div><div class="item-sub">${state.settings.privacy.location ? 'Se agregará al aviso en cuanto se encuentre.' : 'Puedes permitirla en Mi perfil → Privacidad.'}</div></div></div>`;
@@ -972,22 +930,23 @@ VIEWS.emergencia = () => {
     <div class="banner alert" role="alert">${I('alert')}<div>Aviso de emergencia registrado a las ${t12(hhmm(new Date(act.at)))}</div></div>
     <a class="btn btn-danger btn-block btn-xl" style="margin-top:.9rem" href="tel:911">${I('phone')} Llamar al 911</a>
     ${esAdulto() ? nubeEstadoAlerta(act) : ''}
-    <section class="card"><div class="card-head">${I('users')}Avisar a tu familia ahora</div>${rows}</section>
+    <section class="card"><div class="card-head">${I('users')}Avisar a tus contactos ahora</div>${rows}</section>
     <section class="card">${loc}</section>
-    ${esAdulto() ? '' : simNote(nubeOn()
-      ? '<strong>Modo demostración.</strong> El aviso ya aparece en el panel familiar de este teléfono. Para que le llegue solo a otro celular, conecta a tu familia en Mi perfil → Familia conectada. Mientras tanto, usa los botones de arriba.'
-      : '<strong>Modo demostración.</strong> El aviso ya aparece en el panel familiar de este teléfono. Para que le llegue solo a otro celular hace falta la nube (ver GUIA-SUPABASE.md). Mientras tanto, usa los botones de arriba.')}
+    ${!esAdulto() && nubeOn() ? '<p class="small muted" style="margin-top:.8rem;text-align:center">Conecta a tu familia en Mi perfil para que los avisos les lleguen solos.</p>' : ''}
     <button class="btn btn-soft btn-block btn-xl" style="margin-top:1rem" data-act="resolveAlert" data-id="${act.id}">${I('check')} Ya estoy bien · cerrar alerta</button>
     ${history}
   </div>`;
 };
 async function askSOS() {
-  const names = authorizedFamily().map((f) => esc(f.name));
-  let text = names.length ? `Se avisará a: <strong>${names.join(', ')}</strong>.` : 'Aún no tienes familiares autorizados, pero podrás llamar al 911.';
+  let text;
+  if (esAdulto() && state.family.length) text = 'Se avisará a tu familia conectada y podrás llamar o escribir a tus contactos con un toque.';
+  else if (esAdulto()) text = 'Se avisará a tu familia conectada. También podrás llamar al 911.';
+  else if (state.family.length) text = 'Podrás llamar o escribir a tus contactos con un toque, o llamar al 911.';
+  else text = 'Aún no tienes contactos de emergencia. Podrás llamar al 911.';
   if (state.settings.privacy.location) text += ' Se incluirá tu ubicación.';
   const ok = await ask({ title: '¿Necesitas ayuda de emergencia?', text, ok: 'Sí, pedir ayuda', cancel: 'No, cancelar', danger: true });
   if (!ok) return;
-  const a = { id: uid(), at: new Date().toISOString(), loc: null, resolvedAt: null, notified: authorizedFamily().map((f) => f.id) };
+  const a = { id: uid(), at: new Date().toISOString(), loc: null, resolvedAt: null };
   state.alerts.unshift(a);
   save();
   scheduleSync(0);
@@ -1005,9 +964,12 @@ async function askSOS() {
 /* ── Ubicación ── */
 VIEWS.ubicacion = () => {
   const loc = state.location, on = state.settings.privacy.location;
-  const fam = state.family.length
-    ? state.family.map((f) => `<div class="item">${avatar(f.name, f.photo, 'lg')}<div class="grow"><div class="item-title">${esc(f.name)}</div><div class="item-sub">${esc(f.relation || '')}</div></div>${f.authorized && on ? `<span class="chip ok">Puede verla</span>` : `<span class="chip neutral">No</span>`}</div>`).join('')
-    : `<p class="muted" style="padding:.5rem 0">Aún no hay familiares agregados.</p>`;
+  const miembros = esAdulto() ? ui.nube.miembros.filter((m) => m.autorizado) : [];
+  const quien = miembros.length && on
+    ? miembros.map((m) => `<div class="item">${avatar(m.nombre, '', 'lg')}<div class="grow"><div class="item-title">${esc(m.nombre)}</div><div class="item-sub">${esc(m.relacion || 'Familiar')}</div></div><span class="chip ok">Puede verla</span></div>`).join('')
+    : `<p class="muted" style="padding:.5rem 0">${!on ? 'Ahora nadie puede verla.' : esAdulto() ? 'Todavía no hay familiares conectados y autorizados.' : 'Nadie la ve por ahora.'}</p>`;
+  const manage = nubeOn()
+    ? `<button class="btn btn-line btn-block btn-sm" style="margin-top:.6rem" data-act="go" data-view="perfil">${esAdulto() ? 'Administrar familia conectada' : 'Conectar a mi familia'}</button>` : '';
   const last = loc
     ? `<dl class="dl"><dt>Última vez</dt><dd>${cap(fmt(new Date(loc.at), { day: 'numeric', month: 'long' }))}, ${t12(hhmm(new Date(loc.at)))} (${rel(new Date(loc.at) - new Date())})</dd>
        <dt>Coordenadas</dt><dd>${loc.lat.toFixed(5)}, ${loc.lng.toFixed(5)}</dd>
@@ -1020,12 +982,8 @@ VIEWS.ubicacion = () => {
     <button class="btn btn-primary btn-block btn-xl fab-row" data-act="shareLocationNow" ${on ? '' : 'aria-disabled="true"'}>${I('pin')} Compartir mi ubicación ahora</button>
     ${on ? '' : '<p class="small muted" style="text-align:center;margin-top:.5rem">Activa el interruptor de arriba para poder compartirla.</p>'}
     <h2 class="section-title">¿Quién puede verla?</h2>
-    <section class="card" style="margin-top:.4rem">${fam}<button class="btn btn-line btn-block btn-sm" style="margin-top:.6rem" data-act="go" data-view="perfil">Cambiar permisos</button></section>
-    ${esAdulto()
-      ? '<p class="small muted" style="margin-top:1rem;text-align:center">Tu familia conectada y autorizada ve esta ubicación en su celular mientras la compartas.</p>'
-      : simNote(nubeOn()
-        ? '<strong>Modo demostración.</strong> La ubicación se guarda en este teléfono. Para que tu familia la vea en su celular, conéctala en Mi perfil → Familia conectada.'
-        : '<strong>Modo demostración.</strong> La ubicación se guarda en este teléfono. Para que tu familia la vea en su celular se necesita la nube (ver GUIA-SUPABASE.md).')}
+    <section class="card" style="margin-top:.4rem">${quien}${manage}</section>
+    ${esAdulto() ? '<p class="small muted" style="margin-top:1rem;text-align:center">Tu familia conectada y autorizada ve esta ubicación en su celular mientras la compartas.</p>' : ''}
   </div>`;
 };
 async function shareLocationNow() {
@@ -1042,10 +1000,7 @@ async function shareLocationNow() {
 VIEWS.perfil = () => {
   const p = state.profile, s = state.settings;
   const sizeBtn = (v, l) => `<button data-act="setSize" data-size="${v}" aria-pressed="${s.size === v}">${l}</button>`;
-  const fam = state.family.length
-    ? state.family.map((f) => sw(`fam:${f.id}`, f.name, f.relation || 'Familiar', f.authorized)).join('')
-    : '<p class="muted" style="padding:.5rem 0">Agrega familiares en la sección Familia.</p>';
-  const webNote = isNative ? 'Los avisos se programan en tu teléfono y llegan aunque la app esté cerrada.' : 'En el navegador los avisos solo funcionan con la app abierta. En el APK llegan aunque esté cerrada.';
+  const webNote = isNative ? 'Los avisos se programan en tu teléfono y llegan aunque la app esté cerrada.' : 'En el navegador los avisos solo llegan con la app abierta.';
   return `${topbar({ back: true, title: 'Mi perfil', actions: false })}<div class="page">
     <section class="card">
       <div class="photo-pick">${avatar(p.name, p.photo, 'xl')}<div class="stack"><button class="btn btn-soft btn-sm" data-act="pickProfilePhoto">${I('camera')} Cambiar foto</button>${p.photo ? '<button class="btn btn-line btn-sm" data-act="removeProfilePhoto">Quitar foto</button>' : ''}</div></div>
@@ -1068,18 +1023,13 @@ VIEWS.perfil = () => {
     <h2 class="section-title" id="privacidad">Privacidad y permisos</h2>
     <section class="card" style="margin-top:.4rem">
       <div class="card-head">${I('eye')}Qué información se comparte</div>
+      <p class="small muted">Esto aplica a tu familia conectada: tú decides qué pueden ver.</p>
       ${sw('privacy.meds', 'Mis medicinas', 'Si las tomé o están pendientes.', s.privacy.meds)}
       ${sw('privacy.appts', 'Mis citas', 'Citas y actividades de hoy.', s.privacy.appts)}
       ${sw('privacy.location', 'Mi ubicación', 'Solo cuando yo la comparto.', s.privacy.location)}
     </section>
-    <section class="card">
-      <div class="card-head">${I('users')}Contactos autorizados</div>
-      <p class="small muted">Solo ellos pueden consultar tu información.</p>
-      ${fam}
-    </section>
     ${nubeCard()}
     <section class="card">
-      <div class="switch-row"><div class="txt"><div class="t">Cambiar contraseña</div><div class="d">Disponible cuando la app tenga cuentas reales (siguiente fase).</div></div><span class="chip neutral">Próximamente</span></div>
       <div class="switch-row"><div class="txt"><div class="t">Cerrar sesión</div><div class="d">Vuelves a la pantalla de entrada. Tus datos se conservan.</div></div><button class="btn btn-line btn-sm" data-act="logout">${I('logout')} Salir</button></div>
     </section>
 
@@ -1087,16 +1037,14 @@ VIEWS.perfil = () => {
     <section class="card" style="margin-top:.4rem">
       ${sw('notif.enabled', 'Avisos de medicinas y citas', webNote, s.notif.enabled)}
       ${sw('notif.followUp', 'Recordarme si olvido confirmar', 'Un segundo aviso a los 30 minutos.', s.notif.followUp)}
-      <button class="btn btn-soft btn-block" style="margin-top:.8rem" data-act="testNotif">${I('bell')} Probar un aviso</button>
     </section>
 
     <h2 class="section-title">Tamaño de letra</h2>
     <section class="card" style="margin-top:.4rem"><div class="seg" role="group" aria-label="Tamaño de letra">${sizeBtn('normal', 'Normal')}${sizeBtn('large', 'Grande')}${sizeBtn('xlarge', 'Muy grande')}</div></section>
 
-    <h2 class="section-title">Más</h2>
+    <h2 class="section-title">Mis datos</h2>
     <section class="card" style="margin-top:.4rem">
-      <button class="btn btn-line btn-block" data-act="enterFamily">${I('eye')} Ver cómo lo ve mi familiar</button>
-      <button class="btn btn-danger-ghost btn-block" style="margin-top:.6rem" data-act="resetAll">${I('trash')} Borrar todos mis datos</button>
+      <button class="btn btn-danger-ghost btn-block" data-act="resetAll">${I('trash')} Borrar todos mis datos</button>
     </section>
   </div>`;
 };
@@ -1117,7 +1065,7 @@ VIEWS.avisos = () => {
 };
 
 /* ── Panel familiar ── */
-/** Estado de una medicina según su hora y si ya se confirmó (lo usan la simulación y la nube) */
+/** Estado de una medicina según su hora y si ya se confirmó */
 function medKey(time, takenAt, now = new Date()) {
   const due = at(dstr(now), time);
   if (takenAt) return { key: 'taken', takenAt, due };
@@ -1153,23 +1101,12 @@ function rowsFrom(src, now = new Date()) {
     : { tone: 'ok', icon: 'alert', text: 'Emergencias — Sin alertas', sub: '' });
   return rows;
 }
-/** Filas de la simulación (lo que hay en ESTE teléfono) */
-function familyRows(now = new Date()) {
-  const s = state.settings, today = dstr(now), act = activeAlert(), taken = state.log[today] || {};
-  return rowsFrom({
-    name: state.profile.name,
-    meds: s.privacy.meds ? [...state.meds].sort(byTime).map((m) => ({ name: m.name, time: m.time, takenAt: taken[m.id] || null })) : null,
-    appts: s.privacy.appts ? apptsOn(today).map((a) => ({ title: a.title, place: a.place, time: a.time, type: a.type })) : null,
-    location: s.privacy.location && state.location ? state.location : null,
-    alert: act ? { at: act.at } : null,
-  }, now);
-}
 const rowsHtml = (rows) => rows.map((r) => {
   const tone = r.tone === 'lock' ? '' : r.tone;
   return `<div class="item" style="align-items:flex-start"><span class="icon-bubble ${tone}" ${r.tone === 'lock' ? 'style="background:#EFE9DF;color:var(--ink2)"' : ''}>${I(r.icon)}</span><div class="grow"><div class="item-title" ${r.tone === 'lock' ? 'style="color:var(--ink2)"' : ''}>${esc(r.text)}</div>${r.sub ? `<div class="item-sub">${esc(r.sub)}</div>` : ''}${r.link ? `<a class="btn btn-soft btn-sm" style="margin-top:.4rem" href="${r.link}" target="_blank" rel="noopener">Ver en el mapa</a>` : ''}</div></div>`;
 }).join('');
 
-/** Panel de un familiar REAL, con lo que lee de la nube */
+/** Panel de quien se conectó como familiar, con lo que lee de la nube */
 function remoteFamilyView() {
   const R = ui.remoto, d = R.data, nombre = (d && d.adulto) || state.nube.adulto || 'Tu familiar';
   const head = `<header class="topbar"><div class="brand">${LOGO}<span>Panel familiar</span></div><button class="btn btn-line btn-sm" data-act="familiarSalir">${I('logout')} Salir</button></header>`;
@@ -1203,24 +1140,7 @@ function remoteFamilyView() {
     ${call}
   </div>`;
 }
-VIEWS.familiar = () => {
-  if (esFamiliar()) return remoteFamilyView();
-  const fam = state.family;
-  const who = fam.find((f) => f.id === ui.asId) || fam.find((f) => f.authorized) || fam[0];
-  const patient = firstName(state.profile.name) || 'La persona';
-  const head = `<header class="topbar"><div class="brand">${LOGO}<span>Panel familiar</span></div><button class="btn btn-line btn-sm" data-act="exitFamily">${I('logout')} Salir</button></header>`;
-  const note = simNote('<strong>Simulación.</strong> Así lo vería tu familiar en su propio celular. Aquí lo ves en el mismo teléfono para la demostración.');
-  if (!who) return `${head}<div class="page">${note}<div class="card"><div class="empty">${I('users')}<p>Primero agrega familiares en la sección Familia.</p></div></div></div>`;
-  const picker = `<label class="field"><span>Estoy viendo como:</span><select class="input" data-change="familyAs">${fam.map((f) => `<option value="${f.id}" ${f.id === who.id ? 'selected' : ''}>${esc(f.name)} (${esc(f.relation || 'Familiar')})${f.authorized ? '' : ' — sin permiso'}</option>`).join('')}</select></label>`;
-  if (!who.authorized) {
-    return `${head}<div class="page">${note}${picker}<section class="card"><div class="empty">${I('lock')}<p><strong>${esc(patient)} no te ha autorizado.</strong><br>Para ver su información, ${esc(patient)} debe activarte en Mi perfil → Privacidad.</p></div></section></div>`;
-  }
-  const call = state.profile.phone ? `<a class="btn btn-primary btn-block btn-xl" style="margin-top:1rem" href="tel:${digits(state.profile.phone)}">${I('phone')} Llamar a ${esc(patient)}</a>` : '';
-  return `${head}<div class="page">${note}${picker}
-    <section class="card"><div class="row" style="margin-bottom:.4rem">${avatar(state.profile.name, state.profile.photo, 'lg')}<div><div class="big-line" style="font-size:1.3rem">${esc(patient)} — Estado actual</div><div class="item-sub">${cap(fmt(new Date(), { weekday: 'long', day: 'numeric', month: 'long' }))}</div></div></div>${rowsHtml(familyRows())}</section>
-    ${call}
-  </div>`;
-};
+VIEWS.familiar = () => (esFamiliar() ? remoteFamilyView() : VIEWS.inicio());
 
 /* ═══════════════════════════════════════════════════════════
    9. Formularios (hojas inferiores)
@@ -1267,22 +1187,21 @@ function apptSheet(id, date) {
   });
 }
 function familySheet(id) {
-  const f = id ? state.family.find((x) => x.id === id) : { name: '', relation: '', phone: '', photo: '', authorized: true };
+  const f = id ? state.family.find((x) => x.id === id) : { name: '', relation: '', phone: '', photo: '' };
   openSheet({
     title: id ? 'Editar familiar' : 'Agregar familiar',
     body: `<div class="photo-pick"><span id="fam-preview">${avatar(f.name, f.photo, 'xl')}</span><button type="button" class="btn btn-soft btn-sm" data-act="pickFamilyPhoto">${I('camera')} Foto</button></div>
       <input type="hidden" name="photo" value="${esc(f.photo)}">`
-      + fld('Nombre', 'name', f.name, { ph: 'Ej. Carlos Hernández', req: true, ac: 'name' }) + fld('Parentesco', 'relation', f.relation, { ph: 'Ej. Hijo, hija, vecina' }) + fld('Teléfono', 'phone', f.phone, { type: 'tel', ph: '10 dígitos', req: true, ac: 'tel' })
-      + sw('authorized', 'Puede ver mi información', 'Medicinas, citas y ubicación (según tus permisos).', f.authorized).replace('data-switch="authorized"', 'name="authorized" data-switch-local="1"'),
+      + fld('Nombre', 'name', f.name, { ph: 'Ej. Carlos Hernández', req: true, ac: 'name' }) + fld('Parentesco', 'relation', f.relation, { ph: 'Ej. Hijo, hija, vecina' }) + fld('Teléfono', 'phone', f.phone, { type: 'tel', ph: '10 dígitos', req: true, ac: 'tel' }),
     onSubmit: (fd) => {
-      const data = { name: String(fd.get('name') || '').trim(), relation: String(fd.get('relation') || '').trim(), phone: String(fd.get('phone') || '').trim(), photo: String(fd.get('photo') || ''), authorized: fd.get('authorized') === 'on' };
+      const data = { name: String(fd.get('name') || '').trim(), relation: String(fd.get('relation') || '').trim(), phone: String(fd.get('phone') || '').trim(), photo: String(fd.get('photo') || '') };
       if (!data.name) return { error: 'Escribe el nombre.' };
       if (digits(data.phone).replace('+', '').length < 8) return { error: 'Escribe un teléfono válido (al menos 8 dígitos).' };
       if (id) Object.assign(f, data); else state.family.push({ id: uid(), ...data });
       save(); render(true); toast(id ? 'Familiar actualizado.' : 'Familiar agregado.', 'ok');
     },
     onDelete: id ? async () => {
-      if (await ask({ title: `¿Quitar a ${f.name}?`, text: 'Ya no podrá ver tu información ni recibir tus avisos.', ok: 'Sí, quitar', danger: true })) {
+      if (await ask({ title: `¿Quitar a ${f.name}?`, text: 'Dejará de aparecer en tus contactos de emergencia.', ok: 'Sí, quitar', danger: true })) {
         state.family = state.family.filter((x) => x.id !== id); save(); render(true); toast('Familiar eliminado.');
       }
     } : null,
@@ -1381,19 +1300,12 @@ const ACTIONS = {
     try { await NUBE.rpc('familiar_atender_alerta', { p_token: state.nube.token, p_alerta: el.dataset.id }); toast('Listo, avisamos que ya la viste.', 'ok'); nubeLeer(); }
     catch (e) { toast(NUBE.errMsg(e), 'err'); }
   },
-  enterFamily: () => { ui.mode = 'familiar'; render(); },
-  exitFamily: () => { ui.mode = 'adulto'; render(); },
   logout: () => logout(),
   resetAll: () => resetAll(),
-  testNotif: async () => {
-    if (!state.settings.notif.enabled) { toast('Primero activa "Avisos de medicinas y citas".', 'err'); return; }
-    await testNotification();
-  },
   closeSheet: () => closeSheet(),
   sheetDelete: () => { sheet._after = sheet._onDelete; closeSheet(); },
   askYes: () => { sheet._askYes = true; closeSheet(); },
-  startDemo: () => startApp(true),
-  startEmpty: () => startApp(false),
+  start: () => startApp(),
   enter: () => { state.loggedOut = false; save(); ui.view = 'inicio'; showApp(); },
 };
 
@@ -1407,18 +1319,11 @@ document.addEventListener('click', (e) => {
 document.addEventListener('change', async (e) => {
   const el = e.target;
   if (el.matches('[data-bind]')) { setPath(state, el.dataset.bind, el.value.trim()); save(); return; }
-  if (el.matches('[data-change="familyAs"]')) { ui.asId = el.value; render(true); return; }
   if (el.matches('[data-switch]')) await onSwitch(el);
 });
 
 async function onSwitch(el) {
   const id = el.dataset.switch, on = el.checked;
-  if (id.startsWith('fam:')) {
-    const f = state.family.find((x) => x.id === id.slice(4)); if (!f) return;
-    f.authorized = on; save(); render(true);
-    toast(on ? `${f.name} ahora puede ver tu información.` : `${f.name} ya no puede ver tu información.`);
-    return;
-  }
   if (id.startsWith('nube:')) {
     const mid = id.slice(5), m = ui.nube.miembros.find((x) => x.id === mid);
     try {
@@ -1494,18 +1399,19 @@ function showWelcome() {
     <p class="tag">Tus medicinas, tus citas y tu familia, siempre a la mano.</p>
     ${first
       ? `<label class="field"><span>¿Cómo te llamas?</span><input id="welcome-name" class="input" type="text" placeholder="Ej. María" autocomplete="given-name" value="${esc(state.profile.name)}"></label>
-         <button class="btn btn-primary btn-block btn-xl" data-act="startDemo">Comenzar con datos de ejemplo</button>
-         <button class="btn btn-line btn-block btn-xl" data-act="startEmpty">Comenzar desde cero</button>
+         <button class="btn btn-primary btn-block btn-xl" data-act="start">Comenzar</button>
          <button class="btn btn-soft btn-block btn-xl" data-act="joinFamily">Soy familiar · tengo un código</button>`
       : `<p class="lead" style="margin-top:1.3rem">Hola de nuevo${firstName(esFamiliar() ? state.nube.nombre : state.profile.name) ? `, <strong>${esc(firstName(esFamiliar() ? state.nube.nombre : state.profile.name))}</strong>` : ''}.</p>
          <button class="btn btn-primary btn-block btn-xl" data-act="enter">Entrar</button>`}
-    <p class="small muted" style="margin-top:1.3rem">${nubeOn() ? 'Tus datos se guardan en este teléfono. Solo si conectas a tu familia se comparte un resumen del día con quien tú autorices.' : 'Versión de demostración: tus datos se guardan solo en este teléfono.'}</p>
+    <p class="small muted" style="margin-top:1.3rem">Tus datos se guardan en este teléfono. Solo si conectas a tu familia se comparte un resumen del día con quien tú autorices.</p>
   </div>`;
 }
-function startApp(demo) {
-  const name = ($('#welcome-name') && $('#welcome-name').value.trim()) || '';
+function startApp() {
+  const input = $('#welcome-name');
+  const name = (input && input.value.trim()) || '';
+  if (!name) { toast('Escribe tu nombre para comenzar.', 'err'); if (input) input.focus(); return; }
   state.onboarded = true; state.loggedOut = false;
-  if (demo) seedDemo(name); else state.profile.name = name;
+  state.profile.name = name;
   save();
   ui.view = 'inicio';
   showApp();
@@ -1518,7 +1424,6 @@ function setupNative() {
     App.addListener('backButton', () => {
       if (sheet.open) closeSheet();
       else if (esFamiliar()) { if (App.exitApp) App.exitApp(); }
-      else if (ui.mode === 'familiar') { ui.mode = 'adulto'; render(); }
       else if (ui.view !== 'inicio') go(MAIN.includes(ui.view) ? 'inicio' : (ui.prev || 'inicio'));
       else if (App.exitApp) App.exitApp();
     });

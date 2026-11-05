@@ -5,7 +5,7 @@ el familiar ve las medicinas, citas, ubicación y **recibe la alerta de emergenc
 
 Tiempo: unos 15 minutos. Costo: **$0** (plan gratuito de Supabase).
 
-> **Sin esto la app funciona igual**, pero en modo demostración (el panel familiar se ve en el mismo teléfono).
+> **Este paso es necesario antes de compartir o publicar la app.** Sin él, la app abre y sirve para llevar medicinas, citas y emergencias en el propio teléfono, pero *Familia conectada* no estará disponible.
 
 ---
 

@@ -1,7 +1,7 @@
 /* VidaMayor — conexión con la nube (Supabase)
    Solo hace una cosa: llamar a las funciones de la base de datos (supabase/esquema.sql)
-   con `fetch`, sin librerías. Si nube-config.js está vacío, la app funciona igual,
-   sin conexión (modo demostración). */
+   con `fetch`, sin librerías. Si nube-config.js está vacío, la app funciona pero
+   "Familia conectada" no está disponible. */
 (() => {
   'use strict';
   const cfg = () => window.VIDAMAYOR_NUBE || {};
