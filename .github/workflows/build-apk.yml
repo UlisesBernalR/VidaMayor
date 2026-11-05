@@ -1,5 +1,7 @@
 name: Compilar APK
 
+# Se ejecuta cada vez que subes cambios a la rama principal,
+# o a mano desde la pestaña Actions > "Compilar APK" > Run workflow.
 on:
   push:
     branches: [main, master]
@@ -7,7 +9,7 @@ on:
 
 jobs:
   apk:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 40
     steps:
       - name: Descargar el código
@@ -24,8 +26,15 @@ jobs:
           distribution: temurin
           java-version: 21
 
-      - name: SDK de Android
-        uses: android-actions/setup-android@v3
+      # El runner ya trae el SDK de Android. Solo aceptamos licencias y
+      # nos aseguramos de tener la plataforma 36 que pide Capacitor 8.
+      # (Se quitó android-actions/setup-android@v3: fallaba con
+      #  "Failed to find package 'tools'".)
+      - name: SDK de Android (licencias y plataforma 36)
+        run: |
+          SDKM="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$SDKM" --licenses > /dev/null || true
+          "$SDKM" "platforms;android-36" "build-tools;36.0.0"
 
       - name: Instalar dependencias
         run: npm install
