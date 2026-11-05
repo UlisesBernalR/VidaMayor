@@ -1,72 +1,78 @@
-"""Genera los íconos y la pantalla de inicio (assets/*.png) de VidaMayor.
+"""Genera el ícono y la pantalla de inicio (assets/*.png) de VidaMayor
+a partir del logo oficial que está en design/.
+
+  design/logo-abuelitos.png  -> los abuelitos entre las manos (fondo transparente)
+  design/marca.png           -> la palabra "VidaMayor" y el lema
+
 Uso: python3 scripts/make-icons.py   (requiere Pillow)
 Después, `capacitor-assets generate --android` los convierte en los recursos de Android."""
-import math, os
+import os
 from PIL import Image, ImageDraw
 
-TEAL = (46, 125, 116)
-DEEP = (31, 79, 74)
-CREAM = (251, 246, 238)
-WHITE = (255, 255, 255)
-OUT = os.path.join(os.path.dirname(__file__), "..", "assets")
+HERE = os.path.dirname(os.path.abspath(__file__))
+DESIGN = os.path.join(HERE, "..", "design")
+OUT = os.path.join(HERE, "..", "assets")
 os.makedirs(OUT, exist_ok=True)
-SS = 2  # supersampling
+
+CREAM = (253, 251, 238)   # mismo crema del logo original
+DEEP = (31, 79, 74)
+
+logo = Image.open(os.path.join(DESIGN, "logo-abuelitos.png")).convert("RGBA")
+marca = Image.open(os.path.join(DESIGN, "marca.png")).convert("RGB")
 
 
-def heart(draw, cx, cy, width, fill, plus=None):
-    pts = []
-    for i in range(600):
-        t = 2 * math.pi * i / 600
-        x = 16 * math.sin(t) ** 3
-        y = 13 * math.cos(t) - 5 * math.cos(2 * t) - 2 * math.cos(3 * t) - math.cos(4 * t)
-        pts.append((x, -y))
-    xs = [p[0] for p in pts]; ys = [p[1] for p in pts]
-    s = width / (max(xs) - min(xs))
-    mx = (max(xs) + min(xs)) / 2; my = (max(ys) + min(ys)) / 2
-    poly = [(cx + (x - mx) * s, cy + (y - my) * s) for x, y in pts]
-    draw.polygon(poly, fill=fill)
-    if plus:
-        # cruz centrada en la parte ancha del corazón
-        pcx, pcy = cx, cy + width * 0.01
-        arm, th = width * 0.17, width * 0.05
-        r = th * 0.6
-        draw.rounded_rectangle((pcx - th, pcy - arm, pcx + th, pcy + arm), radius=r, fill=plus)
-        draw.rounded_rectangle((pcx - arm, pcy - th, pcx + arm, pcy + th), radius=r, fill=plus)
+def fit_width(img, w):
+    return img.resize((w, round(img.height * w / img.width)), Image.LANCZOS)
 
 
-def canvas(size, bg=None):
-    return Image.new("RGBA", (size * SS, size * SS), bg or (0, 0, 0, 0))
+def paste_center(base, img, cx, cy):
+    x = round(cx - img.width / 2); y = round(cy - img.height / 2)
+    if img.mode == "RGBA":
+        base.alpha_composite(img, (x, y))
+    else:
+        base.paste(img, (x, y))
 
 
-def done(img, size, name):
-    img = img.resize((size, size), Image.LANCZOS)
-    img.save(os.path.join(OUT, name))
+def save(img, name):
+    img.convert("RGBA").save(os.path.join(OUT, name))
     print("ok", name, img.size)
 
 
-# Ícono completo (versión antigua del launcher)
 S = 1024
-im = canvas(S, TEAL + (255,)); d = ImageDraw.Draw(im)
-heart(d, S * SS / 2, S * SS / 2, S * SS * 0.56, WHITE, plus=TEAL)
-done(im, S, "icon-only.png")
 
-# Capa frontal del ícono adaptable (zona segura ~66 %)
-im = canvas(S); d = ImageDraw.Draw(im)
-heart(d, S * SS / 2, S * SS / 2, S * SS * 0.44, WHITE, plus=TEAL)
-done(im, S, "icon-foreground.png")
+# Ícono completo (versión antigua del launcher): logo grande sobre crema
+im = Image.new("RGBA", (S, S), CREAM + (255,))
+paste_center(im, fit_width(logo, 840), S / 2, S / 2)
+save(im, "icon-only.png")
 
-# Capa de fondo
-done(canvas(S, TEAL + (255,)), S, "icon-background.png")
+# Capa frontal del ícono adaptable: debe caber en la zona segura (~66 %)
+im = Image.new("RGBA", (S, S), (0, 0, 0, 0))
+paste_center(im, fit_width(logo, 680), S / 2, S / 2)
+save(im, "icon-foreground.png")
 
-# Pantallas de inicio
-def splash(bg, name):
+# Capa de fondo del ícono adaptable
+save(Image.new("RGBA", (S, S), CREAM + (255,)), "icon-background.png")
+
+
+def splash(name, dark=False):
     N = 2732
-    im = canvas(N, bg + (255,)); d = ImageDraw.Draw(im)
-    box = 620 * SS
-    x0 = N * SS / 2 - box / 2; y0 = N * SS / 2 - box / 2
-    d.rounded_rectangle((x0, y0, x0 + box, y0 + box), radius=box * 0.28, fill=TEAL + (255,) if bg != DEEP else (46, 125, 116, 255))
-    heart(d, N * SS / 2, N * SS / 2, box * 0.56, WHITE, plus=TEAL)
-    done(im, N, name)
+    im = Image.new("RGBA", (N, N), (DEEP if dark else CREAM) + (255,))
+    lg = fit_width(logo, 740)
+    mk = fit_width(marca, 1040)
+    gap = 40
+    total = lg.height + gap + mk.height
+    if dark:  # tarjeta crema para que el logo se lea sobre el fondo oscuro
+        card_w, card_h = 1240, total + 200
+        card = Image.new("RGBA", (card_w * 2, card_h * 2), (0, 0, 0, 0))
+        ImageDraw.Draw(card).rounded_rectangle((0, 0, card_w * 2 - 1, card_h * 2 - 1),
+                                               radius=150, fill=CREAM + (255,))
+        card = card.resize((card_w, card_h), Image.LANCZOS)
+        paste_center(im, card, N / 2, N / 2)
+    top = N / 2 - total / 2
+    paste_center(im, lg, N / 2, top + lg.height / 2)
+    paste_center(im, mk, N / 2, top + lg.height + gap + mk.height / 2)
+    save(im, name)
 
-splash(CREAM, "splash.png")
-splash(DEEP, "splash-dark.png")
+
+splash("splash.png")
+splash("splash-dark.png", dark=True)

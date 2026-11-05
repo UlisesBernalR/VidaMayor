@@ -18,7 +18,8 @@ Está hecha con **HTML, CSS y JavaScript** y se empaqueta como **APK** con [Capa
 | **Ubicación** | Compartir ubicación (GPS del teléfono), última ubicación y quién puede verla |
 | **Mi perfil** | Datos, médico de confianza, información médica, **privacidad y permisos**, notificaciones y tamaño de letra |
 | **Avisos** | Lista de lo pendiente: *"Hora de tomar medicamento"*, *"No se ha confirmado tu medicamento de las 10:00 a. m."* |
-| **Panel familiar** | Lo que vería un familiar autorizado: medicinas confirmadas/pendientes, citas, ubicación y emergencias |
+| **Panel familiar** | Lo que ve un familiar autorizado: medicinas confirmadas/pendientes, citas, ubicación y emergencias |
+| **Familia conectada** | (con la nube activada) Un código une el celular de la persona con el de su familiar; la alerta de emergencia le llega al otro teléfono. Ver [GUIA-SUPABASE.md](GUIA-SUPABASE.md) |
 
 Diseño *Soft & Friendly*: letra grande (con 3 tamaños), alto contraste, botones amplios y pocos colores.
 
@@ -92,15 +93,21 @@ Para abrirlo en Android Studio y probarlo en un emulador: `npm run android:open`
 - Avisos de medicinas (a la hora y otro a los 30 min si no confirmas) y de citas (1 hora antes), aunque la app esté cerrada.
 - GPS para la ubicación, llamadas (`tel:`), mensajes (`sms:`) y WhatsApp con un toque, y mapa.
 
-**Simulado (está marcado en pantalla)**
-- El **panel familiar** se ve en el mismo teléfono, solo para la demostración.
-- El aviso de emergencia queda registrado en este teléfono; el envío automático a *otros* celulares y el aviso al familiar cuando olvidas una medicina necesitan un servidor.
-- *Cambiar contraseña* y las cuentas reales (hoy *Cerrar sesión* solo regresa a la pantalla de entrada).
+**Funciona de verdad entre dos celulares (si activas la nube con [GUIA-SUPABASE.md](GUIA-SUPABASE.md))**
+- La persona crea un código; su familiar lo escribe en su propio teléfono y la persona decide si lo autoriza.
+- El familiar ve, casi al instante, las medicinas confirmadas, las citas del día, la ubicación (si se comparte) y las alertas de emergencia.
+- El filtro de privacidad se aplica **en el servidor**: lo que la persona no comparte nunca sale de la base de datos.
+- Si no hay internet al pedir ayuda, la alerta espera y se envía sola cuando vuelve la conexión.
 
-### Siguiente fase (para conectarla de verdad)
-1. **Supabase** (Auth + PostgreSQL + Realtime) para cuentas, para que el panel familiar se vea en el celular del familiar y la alerta le llegue al instante.
-2. Notificaciones *push* (Firebase Cloud Messaging) para avisar al familiar aunque su app esté cerrada.
-3. Tablas sugeridas: `perfiles`, `medicinas`, `tomas`, `citas`, `familiares`, `ubicaciones` y `alertas`, todas con **RLS** (cada persona solo ve lo que le toca).
+**Todavía simulado (está marcado en pantalla)**
+- Sin la nube configurada, el panel familiar es una simulación en el mismo teléfono.
+- *Cambiar contraseña* y las cuentas con correo (hoy la conexión es por código y autorización).
+- El aviso al familiar cuando **su app está cerrada** (ver siguiente fase): hoy se entera mientras la app está abierta o recién usada.
+
+### Siguiente fase
+1. Notificaciones *push* (Firebase Cloud Messaging) para avisar al familiar aunque su app esté cerrada.
+2. Cuentas reales con Supabase Auth (correo o teléfono) y límites contra abusos, antes de publicarla en Google Play.
+3. Aviso de privacidad: son datos de salud, así que una app publicada necesita consentimiento y política de privacidad.
 
 ---
 
@@ -124,11 +131,17 @@ vidamayor/
 ├── www/                     La app (lo que se empaqueta en el APK)
 │   ├── index.html
 │   ├── style.css
+│   ├── logo.png             Logo de la app (los abuelitos entre las manos)
+│   ├── nube.js              Habla con Supabase (sin librerías)
+│   ├── nube-config.js       Aquí pegas la dirección y la clave de tu proyecto de Supabase
 │   └── script.js            Toda la lógica, comentada por secciones
+├── supabase/
+│   └── esquema.sql          Tablas y funciones seguras de la base de datos
+├── design/                  Logo original recortado (de aquí salen el ícono y la pantalla de inicio)
 ├── assets/                  Ícono y pantalla de inicio (se generan con scripts/make-icons.py)
 ├── scripts/
 │   ├── patch-android.mjs    Permisos, orientación vertical e ícono de notificación
-│   ├── make-icons.py        Dibuja los íconos
+│   ├── make-icons.py        Crea el ícono y la pantalla de inicio a partir de design/
 │   └── serve.mjs            Servidor para verla en el navegador
 ├── .github/workflows/build-apk.yml   Compila el APK en GitHub
 ├── capacitor.config.json    ID de la app (mx.vidamayor.app) y ajustes de plugins

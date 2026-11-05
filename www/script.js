@@ -79,7 +79,7 @@ const ICONS = {
   map: '<path d="M9 4 3 6.5v14L9 18l6 2.5 6-2.5v-14L15 6.5 9 4z"/><path d="M9 4v14M15 6.5v14"/>',
 };
 const I = (name, cls = '') => `<svg class="ico ${cls}" viewBox="0 0 24 24" aria-hidden="true" focusable="false">${ICONS[name] || ''}</svg>`;
-const LOGO = '<svg viewBox="0 0 24 24" aria-hidden="true"><rect width="24" height="24" rx="7" fill="#2E7D74"/><g transform="translate(4.6 4.6) scale(.617)"><path fill="#fff" d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/><path d="M12 6.8v6M9 9.8h6" stroke="#2E7D74" stroke-width="1.9" stroke-linecap="round" fill="none"/></g></svg>';
+const LOGO = '<img class="logo-img" src="logo.png" alt="">';
 
 /* ═══════════════════════════════════════════════════════════
    3. Datos (se guardan en el teléfono)
@@ -105,7 +105,8 @@ function defaults() {
     appts: [],      // { id, type, title, place, date:'2026-11-05', time:'16:00' }
     family: [],     // { id, name, relation, phone, photo, authorized }
     location: null, // { lat, lng, acc, at }
-    alerts: [],     // { id, at, loc, resolvedAt, notified:[ids] }
+    alerts: [],     // { id, at, loc, resolvedAt, notified:[ids], cloud, locSent, closedSent }
+    nube: { rol: '', codigo: '', llave: '', token: '', miembro: '', adulto: '', nombre: '', ultimaAlerta: '' }, // rol: 'adulto' | 'familiar'
   };
 }
 function merge(base, saved) {
@@ -126,9 +127,15 @@ function load() {
   return memoryOnly ? merge(defaults(), memoryOnly) : defaults();
 }
 let state = load();
-function save() {
+/** Guarda en el teléfono (sin avisar a la nube ni reprogramar recordatorios) */
+function persist() {
   try { localStorage.setItem(KEY, JSON.stringify(state)); } catch (e) { memoryOnly = JSON.parse(JSON.stringify(state)); }
+}
+/** Guarda y, si hay familia conectada, la actualiza en la nube */
+function save() {
+  persist();
   scheduleReminders();
+  scheduleSync();
 }
 function seedDemo(name) {
   const now = new Date();
@@ -228,14 +235,14 @@ const geoMsg = (e) => (e && (e.code === 1 || /permiso|denied/i.test(e.message ||
   : 'No pude obtener tu ubicación. Revisa que el GPS esté encendido e intenta de nuevo.');
 
 /** Pide permiso para avisos. Devuelve { ok, msg } */
-async function enableNotifications() {
+async function enableNotifications(exact = true) {
   const LN = plug('LocalNotifications');
   if (isNative && LN) {
     let st = await LN.checkPermissions();
     if (st.display !== 'granted') st = await LN.requestPermissions();
     if (st.display !== 'granted') return { ok: false, msg: 'No diste permiso para los avisos. Actívalo en los ajustes del teléfono.' };
     try { await LN.createChannel({ id: CHANNEL, name: 'Recordatorios', description: 'Medicinas y citas', importance: 5, visibility: 1, vibration: true }); } catch (e) { /* ya existe */ }
-    try {
+    if (exact) try {
       const ex = await LN.checkExactNotificationSetting();
       if (ex && ex.exact_alarm === 'denied') {
         const si = await ask({ title: 'Avisos puntuales', text: 'Para que los avisos lleguen justo a la hora, activa "Alarmas y recordatorios" para VidaMayor en la siguiente pantalla.', ok: 'Abrir ajustes', cancel: 'Ahora no' });
@@ -494,6 +501,242 @@ function computeNotices(now = new Date()) {
 const noticeCount = () => computeNotices().filter((n) => n.kind === 'warn' || n.kind === 'due' || n.kind === 'sos').length;
 
 /* ═══════════════════════════════════════════════════════════
+   7b. Familia conectada (nube · Supabase)
+   El adulto sube un resumen de su día; el familiar lo lee desde su propio celular.
+   Todo pasa por las funciones de supabase/esquema.sql (ver www/nube.js).
+   ═══════════════════════════════════════════════════════════ */
+const NUBE = window.VMNube || { configured: () => false, rpc: async () => { throw Object.assign(new Error('sin_configurar'), { code: 'sin_configurar' }); }, errMsg: () => 'La nube no está disponible.' };
+const nubeOn = () => NUBE.configured();
+const esAdulto = () => state.nube.rol === 'adulto' && !!state.nube.llave;
+const esFamiliar = () => state.nube.rol === 'familiar' && !!state.nube.token;
+const fmtCodigo = (c) => (c && c.length === 8 ? `${c.slice(0, 4)}-${c.slice(4)}` : c || '');
+ui.nube = { miembros: [], alertas: [], at: 0, err: '', avisados: new Set() };   // lo que sabe el adulto
+ui.remoto = { data: null, at: 0, err: '' };                                       // lo que ve el familiar
+
+/** Redibuja sin molestar si la persona está escribiendo o hay una hoja abierta */
+function softRender() {
+  if (sheet.open || $('#app').hidden) return;
+  const a = document.activeElement;
+  if (a && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName)) return;
+  render(true);
+}
+
+/** Lo que se sube a la nube: medicinas y citas de HOY (el servidor oculta lo que la privacidad no permite) */
+function buildResumen() {
+  const today = dstr();
+  const taken = state.log[today] || {};
+  return {
+    fecha: today,
+    telefono: state.profile.phone || '',
+    meds: [...state.meds].sort(byTime).map((m) => ({ name: m.name, dose: m.dose || '', time: m.time, takenAt: taken[m.id] || null })),
+    appts: apptsOn(today).map((a) => ({ title: a.title, place: a.place || '', time: a.time, type: a.type })),
+  };
+}
+
+let syncTimer = null, syncBusy = false, syncAgain = false;
+function scheduleSync(delay = 1500) {
+  if (!nubeOn() || !esAdulto()) return;
+  clearTimeout(syncTimer);
+  syncTimer = setTimeout(nubeSync, delay);
+}
+/** ADULTO: manda alertas pendientes y el resumen; recibe familiares y alertas */
+async function nubeSync() {
+  if (!nubeOn() || !esAdulto()) return;
+  if (syncBusy) { syncAgain = true; return; }
+  syncBusy = true;
+  const L = state.nube.llave, priv = state.settings.privacy;
+  try {
+    for (const a of state.alerts.slice(0, 5)) {
+      if (!a.cloud && !a.resolvedAt) {
+        const r = await NUBE.rpc('adulto_pedir_ayuda', { p_llave: L, p_ubicacion: priv.location && a.loc ? a.loc : null });
+        a.cloud = r.alerta; a.locSent = !!(priv.location && a.loc); persist();
+      }
+      if (a.cloud && !a.resolvedAt && priv.location && a.loc && !a.locSent) {
+        await NUBE.rpc('adulto_alerta_ubicacion', { p_llave: L, p_alerta: a.cloud, p_ubicacion: a.loc });
+        a.locSent = true; persist();
+      }
+      if (a.cloud && a.resolvedAt && !a.closedSent) {
+        await NUBE.rpc('adulto_cerrar_alerta', { p_llave: L, p_alerta: a.cloud });
+        a.closedSent = true; persist();
+      }
+    }
+    const r = await NUBE.rpc('adulto_sincronizar', {
+      p_llave: L, p_nombre: state.profile.name || '',
+      p_privacidad: { meds: !!priv.meds, appts: !!priv.appts, location: !!priv.location },
+      p_resumen: buildResumen(), p_ubicacion: priv.location ? state.location : null,
+    });
+    ui.nube.err = '';
+    nubeAplicar(r);
+  } catch (e) {
+    ui.nube.err = NUBE.errMsg(e);
+    if (e && e.code === 'llave_invalida') {
+      state.nube = defaults().nube; persist(); ui.nube.miembros = []; ui.nube.alertas = [];
+      toast('La conexión con tu familia se cerró.', 'err');
+    }
+    if (['perfil', 'emergencia'].includes(ui.view)) softRender();
+  } finally {
+    syncBusy = false;
+    if (syncAgain) { syncAgain = false; scheduleSync(300); }
+  }
+}
+function nubeAplicar(r) {
+  const antes = JSON.stringify([ui.nube.miembros, ui.nube.alertas, ui.nube.err]);
+  ui.nube.miembros = r.miembros || []; ui.nube.alertas = r.alertas || []; ui.nube.at = Date.now();
+  if (r.codigo && r.codigo !== state.nube.codigo) { state.nube.codigo = r.codigo; persist(); }
+  for (const m of ui.nube.miembros) {
+    if (!m.autorizado && !ui.nube.avisados.has(m.id)) { ui.nube.avisados.add(m.id); toast(`${m.nombre} quiere conectarse. Autorízalo en Mi perfil.`); }
+  }
+  if (antes !== JSON.stringify([ui.nube.miembros, ui.nube.alertas, ui.nube.err]) && ['perfil', 'emergencia'].includes(ui.view)) softRender();
+}
+
+let leerBusy = false;
+/** FAMILIAR: lee el estado de la persona y avisa si hay una emergencia nueva */
+async function nubeLeer() {
+  if (!nubeOn() || !esFamiliar() || leerBusy) return;
+  leerBusy = true;
+  try {
+    const d = await NUBE.rpc('familiar_leer', { p_token: state.nube.token });
+    ui.remoto = { data: d, at: Date.now(), err: '' };
+    if (d.adulto && d.adulto !== state.nube.adulto) { state.nube.adulto = d.adulto; persist(); }
+    const act = d.autorizado && (d.alertas || []).find((a) => !a.cerrada);
+    if (act && state.nube.ultimaAlerta !== act.id) {
+      state.nube.ultimaAlerta = act.id; persist();
+      avisarEmergencia(d.adulto, act);
+    }
+  } catch (e) {
+    if (e && e.code === 'token_invalido') { limpiarTodo(`Ya no estás conectado con ${state.nube.adulto || 'tu familiar'}.`); return; }
+    ui.remoto.err = NUBE.errMsg(e);
+  } finally { leerBusy = false; }
+  if (ui.mode === 'familiar') softRender();
+}
+async function avisarEmergencia(nombre, alerta) {
+  const title = `¡Emergencia! ${firstName(nombre) || 'Tu familiar'} pidió ayuda`;
+  const body = 'Abre VidaMayor para llamarle y ver su ubicación.';
+  toast(title, 'err');
+  try { if (navigator.vibrate) navigator.vibrate([400, 200, 400, 200, 400]); } catch (e) { /* sin vibración */ }
+  const LN = plug('LocalNotifications');
+  if (isNative && LN) {
+    try {
+      const st = await LN.checkPermissions();
+      if (st.display === 'granted') {
+        // sin "schedule" el aviso sale de inmediato
+        await LN.schedule({ notifications: [{ id: hash('sos|' + alerta.id) & 0x7fffffff, title, body, channelId: CHANNEL, smallIcon: 'ic_stat_vidamayor', iconColor: '#C62828' }] });
+      }
+    } catch (e) { console.warn('Aviso de emergencia:', e); }
+  } else if ('Notification' in window && Notification.permission === 'granted') {
+    try { new Notification(title, { body }); } catch (e) { /* ignorar */ }
+  }
+}
+
+let nubeTicks = 0;
+function nubeTick() {
+  if (document.hidden || !nubeOn() || $('#app').hidden && $('#welcome').hidden) return;
+  nubeTicks++;
+  if (esFamiliar()) nubeLeer();
+  else if (esAdulto() && (nubeTicks % 2 === 0 || activeAlert())) nubeSync();
+}
+function nubeKick() {
+  if (!nubeOn()) return;
+  if (esFamiliar()) nubeLeer(); else if (esAdulto()) nubeSync();
+}
+
+async function crearFamilia() {
+  if (!nubeOn()) { toast(NUBE.errMsg({ code: 'sin_configurar' }), 'err'); return; }
+  toast('Conectando…');
+  try {
+    const r = await NUBE.rpc('crear_familia', { p_nombre: state.profile.name || '' });
+    state.nube = { ...defaults().nube, rol: 'adulto', codigo: r.codigo, llave: r.llave };
+    persist();
+    await nubeSync();
+    render(true);
+    toast('Listo. Comparte el código con tu familia.', 'ok');
+  } catch (e) { toast(NUBE.errMsg(e), 'err'); }
+}
+
+function joinSheet() {
+  openSheet({
+    title: 'Conectarme con mi familiar',
+    submit: 'Conectarme',
+    body: `<p class="small muted" style="margin-bottom:.5rem">Pídele a tu familiar el código de 8 letras que aparece en su VidaMayor (Mi perfil → Familia conectada).</p>`
+      + fld('Tu nombre', 'nombre', '', { ph: 'Ej. Carlos', req: true, ac: 'given-name' })
+      + fld('¿Qué eres de esa persona?', 'relacion', '', { ph: 'Ej. Hijo' })
+      + fld('Código', 'codigo', '', { ph: 'Ej. K7M2-XQ9P', req: true }),
+    onSubmit: async (fd) => {
+      const nombre = String(fd.get('nombre') || '').trim(), codigo = String(fd.get('codigo') || '').trim();
+      if (!nombre) return { error: 'Escribe tu nombre.' };
+      if (codigo.replace(/[^A-Za-z0-9]/g, '').length < 8) return { error: 'El código tiene 8 letras o números.' };
+      if (!nubeOn()) return { error: NUBE.errMsg({ code: 'sin_configurar' }) };
+      try {
+        const r = await NUBE.rpc('unirse', { p_codigo: codigo, p_nombre: nombre, p_relacion: String(fd.get('relacion') || '').trim() });
+        state.nube = { ...defaults().nube, rol: 'familiar', token: r.token, miembro: r.miembro, adulto: r.adulto || '', nombre };
+        state.onboarded = true; state.loggedOut = false; persist();
+        ui.remoto = { data: null, at: 0, err: '' };
+        sheet._after = () => { ui.view = 'inicio'; showApp(); enableNotifications(false).catch(() => {}); };
+      } catch (e) { return { error: NUBE.errMsg(e) }; }
+    },
+  });
+}
+
+/** Borra todo lo local y vuelve a la pantalla de entrada */
+function limpiarTodo(aviso = '') {
+  try { localStorage.removeItem(KEY); } catch (e) { /* nada */ }
+  memoryOnly = null;
+  state = defaults();
+  document.documentElement.dataset.size = 'normal';
+  ui.view = 'inicio'; ui.mode = 'adulto';
+  ui.nube.miembros = []; ui.nube.alertas = []; ui.nube.err = ''; ui.remoto = { data: null, at: 0, err: '' };
+  scheduleReminders();
+  showWelcome();
+  if (aviso) toast(aviso);
+}
+
+/* ── Tarjeta "Familia conectada" (en Mi perfil) ── */
+function nubeCard() {
+  const head = `<div class="card-head">${I('users')}Familia conectada</div>`;
+  if (!nubeOn()) return `<section class="card">${head}<p class="small muted">Con internet, tu familia podría ver cómo estás desde su propio celular. Esta versión de la app todavía no tiene la nube activada.</p></section>`;
+  if (!esAdulto()) return `<section class="card">${head}
+      <p class="small muted">Crea un código y compártelo con tu familia. Ellos instalan VidaMayor, eligen "Soy familiar" y lo escriben. Tú decides a quién autorizar.</p>
+      <button class="btn btn-primary btn-block" style="margin-top:.7rem" data-act="crearFamilia">${I('users')} Conectar a mi familia</button></section>`;
+  const code = fmtCodigo(state.nube.codigo);
+  const msg = `Hola, soy ${firstName(state.profile.name) || 'tu familiar'}. Instala VidaMayor, elige "Soy familiar" y escribe este código: ${code}`;
+  const list = ui.nube.miembros.length
+    ? ui.nube.miembros.map((m) => `<div class="item" style="display:block">${sw(`nube:${m.id}`, m.nombre, `${m.relacion || 'Familiar'} · ${m.autorizado ? 'Puede ver tu información' : 'Quiere conectarse: espera tu permiso'}`, m.autorizado)}<button class="btn btn-danger-ghost btn-sm" data-act="quitarMiembro" data-id="${esc(m.id)}">${I('trash')} Quitar</button></div>`).join('')
+    : '<p class="small muted" style="padding:.5rem 0">Todavía nadie se ha conectado.</p>';
+  const estado = ui.nube.err
+    ? `<p class="small" style="color:var(--danger-d);margin-top:.6rem">${esc(ui.nube.err)} Se reintentará solo.</p>`
+    : `<p class="small muted" style="margin-top:.6rem">${ui.nube.at ? `Sincronizado ${rel(ui.nube.at - Date.now())}.` : 'Sincronizando…'}</p>`;
+  return `<section class="card">${head}
+      <p class="small muted">Dale este código a tu familiar. Cuando se conecte, aparecerá aquí para que lo autorices.</p>
+      <div class="code-box" aria-label="Código familiar">${esc(code)}</div>
+      <div class="btn-grid3" style="margin-top:.6rem">
+        <button class="btn btn-soft btn-sm" data-act="copiarCodigo">Copiar</button>
+        <a class="btn btn-soft btn-sm" href="https://wa.me/?text=${encodeURIComponent(msg)}" target="_blank" rel="noopener">WhatsApp</a>
+        <button class="btn btn-soft btn-sm" data-act="nuevoCodigo">Cambiar</button>
+      </div>
+      <h3 class="small" style="margin:1rem 0 .2rem;font-weight:800">Familiares conectados</h3>
+      ${list}
+      ${estado}
+      <button class="btn btn-danger-ghost btn-block" style="margin-top:.6rem" data-act="desconectarNube">${I('trash')} Desconectar y borrar de la nube</button>
+    </section>`;
+}
+/** Estado de la alerta de emergencia en la nube (pantalla Emergencia del adulto) */
+function nubeEstadoAlerta(a) {
+  if (!esAdulto()) return '';
+  const rem = a.cloud ? ui.nube.alertas.find((x) => x.id === a.cloud) : null;
+  const autorizados = ui.nube.miembros.filter((m) => m.autorizado);
+  let titulo, sub = '', tone = '';
+  if (!a.cloud) { titulo = 'Enviando el aviso a tu familia…'; sub = ui.nube.err ? 'Sin internet por ahora: se enviará en cuanto haya conexión.' : ''; tone = 'warn'; }
+  else if (!autorizados.length) { titulo = 'Aviso enviado a la nube'; sub = 'Todavía no tienes familiares conectados y autorizados.'; tone = 'warn'; }
+  else {
+    const vistas = rem ? rem.vistas || [] : [];
+    titulo = `Aviso enviado a ${autorizados.length} ${autorizados.length === 1 ? 'familiar conectado' : 'familiares conectados'}`;
+    sub = vistas.length ? vistas.map((v) => `${v.nombre} ya vio tu alerta`).join(' · ') : 'Esperando a que lo vean…';
+    tone = 'ok';
+  }
+  return `<section class="card"><div class="item"><span class="icon-bubble ${tone}">${I(tone === 'ok' ? 'check' : 'clock')}</span><div class="grow"><div class="item-title">${esc(titulo)}</div>${sub ? `<div class="item-sub">${esc(sub)}</div>` : ''}</div></div></section>`;
+}
+
+/* ═══════════════════════════════════════════════════════════
    8. Pantallas
    ═══════════════════════════════════════════════════════════ */
 const VIEWS = {};
@@ -703,7 +946,11 @@ VIEWS.emergencia = () => {
       <p class="lead">Si necesitas ayuda, presiona el botón. Antes de enviar te pediremos confirmación.</p>
       <div class="sos-round-wrap"><button class="sos-round" data-act="askSOS" aria-label="Pedir ayuda de emergencia">${I('alert')}EMERGENCIA</button></div>
       <a class="btn btn-line btn-block btn-xl" href="tel:911">${I('phone')} Llamar al 911</a>
-      ${simNote('<strong>Modo demostración.</strong> El aviso queda registrado en el panel familiar de este teléfono y puedes mandar mensajes con un toque. El envío automático a otros celulares necesita un servidor (siguiente fase).')}
+      ${esAdulto()
+        ? '<p class="small muted" style="margin-top:1rem;text-align:center">Al pedir ayuda, el aviso le llega a tu familia conectada y autorizada.</p>'
+        : simNote(nubeOn()
+          ? '<strong>Modo demostración.</strong> El aviso queda registrado en este teléfono y puedes mandar mensajes con un toque. Para que le llegue solo a otro celular, conecta a tu familia en Mi perfil → Familia conectada.'
+          : '<strong>Modo demostración.</strong> El aviso queda registrado en el panel familiar de este teléfono y puedes mandar mensajes con un toque. El envío automático a otros celulares necesita la nube (ver GUIA-SUPABASE.md).')}
       ${history}
     </div>`;
   }
@@ -724,9 +971,12 @@ VIEWS.emergencia = () => {
   return `${topbar()}<div class="page">
     <div class="banner alert" role="alert">${I('alert')}<div>Aviso de emergencia registrado a las ${t12(hhmm(new Date(act.at)))}</div></div>
     <a class="btn btn-danger btn-block btn-xl" style="margin-top:.9rem" href="tel:911">${I('phone')} Llamar al 911</a>
+    ${esAdulto() ? nubeEstadoAlerta(act) : ''}
     <section class="card"><div class="card-head">${I('users')}Avisar a tu familia ahora</div>${rows}</section>
     <section class="card">${loc}</section>
-    ${simNote('<strong>Modo demostración.</strong> El aviso ya aparece en el panel familiar de este teléfono. Para que le llegue solo a otro celular hace falta conectar un servidor (siguiente fase). Mientras tanto, usa los botones de arriba.')}
+    ${esAdulto() ? '' : simNote(nubeOn()
+      ? '<strong>Modo demostración.</strong> El aviso ya aparece en el panel familiar de este teléfono. Para que le llegue solo a otro celular, conecta a tu familia en Mi perfil → Familia conectada. Mientras tanto, usa los botones de arriba.'
+      : '<strong>Modo demostración.</strong> El aviso ya aparece en el panel familiar de este teléfono. Para que le llegue solo a otro celular hace falta la nube (ver GUIA-SUPABASE.md). Mientras tanto, usa los botones de arriba.')}
     <button class="btn btn-soft btn-block btn-xl" style="margin-top:1rem" data-act="resolveAlert" data-id="${act.id}">${I('check')} Ya estoy bien · cerrar alerta</button>
     ${history}
   </div>`;
@@ -740,6 +990,7 @@ async function askSOS() {
   const a = { id: uid(), at: new Date().toISOString(), loc: null, resolvedAt: null, notified: authorizedFamily().map((f) => f.id) };
   state.alerts.unshift(a);
   save();
+  scheduleSync(0);
   ui.view = 'emergencia';
   render();
   if (state.settings.privacy.location) {
@@ -770,7 +1021,11 @@ VIEWS.ubicacion = () => {
     ${on ? '' : '<p class="small muted" style="text-align:center;margin-top:.5rem">Activa el interruptor de arriba para poder compartirla.</p>'}
     <h2 class="section-title">¿Quién puede verla?</h2>
     <section class="card" style="margin-top:.4rem">${fam}<button class="btn btn-line btn-block btn-sm" style="margin-top:.6rem" data-act="go" data-view="perfil">Cambiar permisos</button></section>
-    ${simNote('<strong>Modo demostración.</strong> La ubicación se guarda en este teléfono. Para que tu familia la vea en su celular se necesita un servidor (siguiente fase).')}
+    ${esAdulto()
+      ? '<p class="small muted" style="margin-top:1rem;text-align:center">Tu familia conectada y autorizada ve esta ubicación en su celular mientras la compartas.</p>'
+      : simNote(nubeOn()
+        ? '<strong>Modo demostración.</strong> La ubicación se guarda en este teléfono. Para que tu familia la vea en su celular, conéctala en Mi perfil → Familia conectada.'
+        : '<strong>Modo demostración.</strong> La ubicación se guarda en este teléfono. Para que tu familia la vea en su celular se necesita la nube (ver GUIA-SUPABASE.md).')}
   </div>`;
 };
 async function shareLocationNow() {
@@ -822,6 +1077,7 @@ VIEWS.perfil = () => {
       <p class="small muted">Solo ellos pueden consultar tu información.</p>
       ${fam}
     </section>
+    ${nubeCard()}
     <section class="card">
       <div class="switch-row"><div class="txt"><div class="t">Cambiar contraseña</div><div class="d">Disponible cuando la app tenga cuentas reales (siguiente fase).</div></div><span class="chip neutral">Próximamente</span></div>
       <div class="switch-row"><div class="txt"><div class="t">Cerrar sesión</div><div class="d">Vuelves a la pantalla de entrada. Tus datos se conservan.</div></div><button class="btn btn-line btn-sm" data-act="logout">${I('logout')} Salir</button></div>
@@ -860,34 +1116,95 @@ VIEWS.avisos = () => {
   </div>`;
 };
 
-/* ── Panel familiar (simulación de lo que vería un familiar) ── */
-function familyRows(now = new Date()) {
-  const s = state.settings, today = dstr(now), rows = [];
-  if (s.privacy.meds) {
-    for (const m of [...state.meds].sort(byTime)) {
-      const st = medStatus(m, now);
+/* ── Panel familiar ── */
+/** Estado de una medicina según su hora y si ya se confirmó (lo usan la simulación y la nube) */
+function medKey(time, takenAt, now = new Date()) {
+  const due = at(dstr(now), time);
+  if (takenAt) return { key: 'taken', takenAt, due };
+  const diff = now - due;
+  if (diff > 30 * 60000) return { key: 'late', due };
+  return { key: diff >= 0 ? 'due' : 'soon', due };
+}
+/** Arma las filas del panel familiar.
+    src = { name, stale, meds|null, appts|null, location|null, alert|null }   (null = no se comparte) */
+function rowsFrom(src, now = new Date()) {
+  const rows = [], name = firstName(src.name) || 'La persona';
+  if (src.meds && src.stale) rows.push({ tone: 'lock', icon: 'pill', text: 'Medicinas — sin datos de hoy', sub: `Se actualizarán cuando ${name} abra VidaMayor.` });
+  else if (src.meds) {
+    for (const m of src.meds) {
+      const st = medKey(m.time, m.takenAt, now);
       if (st.key === 'taken') rows.push({ tone: 'ok', icon: 'check', text: `Medicamento ${t12(m.time)} — Confirmado`, sub: `${m.name} · tomada a las ${t12(st.takenAt)}` });
       else if (st.key === 'late') rows.push({ tone: 'warn', icon: 'alert', text: `Medicamento ${t12(m.time)} — Sin confirmar`, sub: `${m.name} · pasó la hora ${rel(now - st.due)}` });
       else rows.push({ tone: '', icon: 'pill', text: `Medicamento ${t12(m.time)} — Pendiente`, sub: m.name });
     }
-    if (!state.meds.length) rows.push({ tone: '', icon: 'pill', text: 'Medicamentos — Sin registrar', sub: '' });
-  } else rows.push({ tone: 'lock', icon: 'lock', text: 'Medicinas — no se comparten', sub: `${firstName(state.profile.name) || 'La persona'} decidió no compartir esta información.` });
-  if (s.privacy.appts) {
-    const list = apptsOn(today);
-    for (const a of list) {
-      const past = at(a.date, a.time) < now;
+    if (!src.meds.length) rows.push({ tone: '', icon: 'pill', text: 'Medicamentos — Sin registrar', sub: '' });
+  } else rows.push({ tone: 'lock', icon: 'lock', text: 'Medicinas — no se comparten', sub: `${name} decidió no compartir esta información.` });
+  if (src.appts && src.stale) rows.push({ tone: 'lock', icon: 'calendar', text: 'Citas — sin datos de hoy', sub: '' });
+  else if (src.appts) {
+    for (const a of src.appts) {
+      const past = at(dstr(now), a.time) < now;
       rows.push({ tone: past ? 'lock' : '', icon: 'calendar', text: `${(TYPES[a.type] || TYPES.cita).label} ${t12(a.time)} — ${past ? 'Ya pasó' : 'Pendiente'}`, sub: a.title + (a.place ? ` · ${a.place}` : '') });
     }
-    if (!list.length) rows.push({ tone: '', icon: 'calendar', text: 'Citas de hoy — Ninguna', sub: '' });
+    if (!src.appts.length) rows.push({ tone: '', icon: 'calendar', text: 'Citas de hoy — Ninguna', sub: '' });
   } else rows.push({ tone: 'lock', icon: 'lock', text: 'Citas — no se comparten', sub: '' });
-  if (s.privacy.location && state.location) rows.push({ tone: 'ok', icon: 'pin', text: `Última ubicación compartida — ${rel(new Date(state.location.at) - now)}`, sub: 'Actualizada', link: `https://www.google.com/maps?q=${state.location.lat},${state.location.lng}` });
+  if (src.location) rows.push({ tone: 'ok', icon: 'pin', text: `Última ubicación compartida — ${src.location.at ? rel(new Date(src.location.at) - now) : 'reciente'}`, sub: 'Actualizada', link: `https://www.google.com/maps?q=${Number(src.location.lat)},${Number(src.location.lng)}` });
   else rows.push({ tone: 'lock', icon: 'pin', text: 'Ubicación — no compartida', sub: '' });
-  const act = activeAlert();
-  rows.push(act ? { tone: 'danger', icon: 'alert', text: `Emergencia activa desde las ${t12(hhmm(new Date(act.at)))}`, sub: 'Llama de inmediato', link: null }
+  rows.push(src.alert ? { tone: 'danger', icon: 'alert', text: `Emergencia activa desde las ${t12(hhmm(new Date(src.alert.at)))}`, sub: 'Llama de inmediato', link: null }
     : { tone: 'ok', icon: 'alert', text: 'Emergencias — Sin alertas', sub: '' });
   return rows;
 }
+/** Filas de la simulación (lo que hay en ESTE teléfono) */
+function familyRows(now = new Date()) {
+  const s = state.settings, today = dstr(now), act = activeAlert(), taken = state.log[today] || {};
+  return rowsFrom({
+    name: state.profile.name,
+    meds: s.privacy.meds ? [...state.meds].sort(byTime).map((m) => ({ name: m.name, time: m.time, takenAt: taken[m.id] || null })) : null,
+    appts: s.privacy.appts ? apptsOn(today).map((a) => ({ title: a.title, place: a.place, time: a.time, type: a.type })) : null,
+    location: s.privacy.location && state.location ? state.location : null,
+    alert: act ? { at: act.at } : null,
+  }, now);
+}
+const rowsHtml = (rows) => rows.map((r) => {
+  const tone = r.tone === 'lock' ? '' : r.tone;
+  return `<div class="item" style="align-items:flex-start"><span class="icon-bubble ${tone}" ${r.tone === 'lock' ? 'style="background:#EFE9DF;color:var(--ink2)"' : ''}>${I(r.icon)}</span><div class="grow"><div class="item-title" ${r.tone === 'lock' ? 'style="color:var(--ink2)"' : ''}>${esc(r.text)}</div>${r.sub ? `<div class="item-sub">${esc(r.sub)}</div>` : ''}${r.link ? `<a class="btn btn-soft btn-sm" style="margin-top:.4rem" href="${r.link}" target="_blank" rel="noopener">Ver en el mapa</a>` : ''}</div></div>`;
+}).join('');
+
+/** Panel de un familiar REAL, con lo que lee de la nube */
+function remoteFamilyView() {
+  const R = ui.remoto, d = R.data, nombre = (d && d.adulto) || state.nube.adulto || 'Tu familiar';
+  const head = `<header class="topbar"><div class="brand">${LOGO}<span>Panel familiar</span></div><button class="btn btn-line btn-sm" data-act="familiarSalir">${I('logout')} Salir</button></header>`;
+  if (!d) {
+    return `${head}<div class="page"><section class="card"><div class="empty">${I('users')}<p>${R.err ? esc(R.err) : `Conectando con ${esc(nombre)}…`}</p></div>${R.err ? `<button class="btn btn-primary btn-block" data-act="reintentarNube">Reintentar</button>` : ''}</section></div>`;
+  }
+  if (!d.autorizado) {
+    return `${head}<div class="page"><section class="card"><div class="empty">${I('lock')}<p><strong>Esperando autorización</strong><br>${esc(nombre)} debe aceptarte en VidaMayor → Mi perfil → Familia conectada.</p></div></section><p class="small muted" style="text-align:center;margin-top:.8rem">Volveremos a revisar en unos segundos.</p></div>`;
+  }
+  const r = d.resumen || {}, now = new Date();
+  const act = (d.alertas || []).find((a) => !a.cerrada);
+  const stale = r.fecha !== dstr(now);
+  const visto = rel(new Date(d.actualizada) - new Date(d.ahora));   // se compara con la hora del servidor
+  const first = firstName(nombre) || 'Tu familiar';
+  const yaVi = act && (act.vistas || []).some((v) => v.miembro === state.nube.miembro);
+  const alertBox = act ? `<div class="banner alert" role="alert">${I('alert')}<div>
+      <div>${esc(first)} pidió ayuda a las ${t12(hhmm(new Date(act.creada)))}</div>
+      ${r.telefono ? `<a class="btn btn-danger btn-block" href="tel:${digits(r.telefono)}">${I('phone')} Llamar a ${esc(first)}</a>` : ''}
+      <a class="btn btn-line btn-block" href="tel:911">${I('phone')} Llamar al 911</a>
+      ${act.ubicacion ? `<a class="btn btn-soft btn-block" href="https://www.google.com/maps?q=${Number(act.ubicacion.lat)},${Number(act.ubicacion.lng)}" target="_blank" rel="noopener">${I('pin')} Ver dónde está</a>` : ''}
+      ${yaVi ? '<div class="small" style="margin-top:.6rem">Ya avisaste que la viste.</div>' : `<button class="btn btn-primary btn-block" data-act="atenderAlerta" data-id="${esc(act.id)}">${I('check')} Ya la vi, voy en camino</button>`}
+      ${(act.vistas || []).length ? `<div class="small" style="margin-top:.6rem">${(act.vistas).map((v) => `${esc(v.nombre)} ya la vio`).join(' · ')}</div>` : ''}
+    </div></div>` : '';
+  const aviso = (txt) => `<div class="banner" style="background:var(--warn-l);color:var(--warn-ink)">${I('info')}<div>${txt}</div></div>`;
+  const banners = (R.err ? aviso(`Sin conexión con la nube: mostrando lo último que se supo (${esc(visto)}).`) : '')
+    + (stale ? aviso(`Todavía no hay datos de hoy de ${esc(first)}. Última actualización: ${esc(visto)}.`) : '');
+  const src = { name: nombre, stale, meds: r.meds || null, appts: r.appts || null, location: d.ubicacion || null, alert: act ? { at: act.creada } : null };
+  const call = !act && r.telefono ? `<a class="btn btn-primary btn-block btn-xl" style="margin-top:1rem" href="tel:${digits(r.telefono)}">${I('phone')} Llamar a ${esc(first)}</a>` : '';
+  return `${head}<div class="page">${alertBox}${banners}
+    <section class="card"><div class="row" style="margin-bottom:.4rem">${avatar(nombre, '', 'lg')}<div><div class="big-line" style="font-size:1.3rem">${esc(first)} — Estado actual</div><div class="item-sub">${cap(fmt(now, { weekday: 'long', day: 'numeric', month: 'long' }))} · actualizado ${esc(visto)}</div></div></div>${rowsHtml(rowsFrom(src, now))}</section>
+    ${call}
+  </div>`;
+}
 VIEWS.familiar = () => {
+  if (esFamiliar()) return remoteFamilyView();
   const fam = state.family;
   const who = fam.find((f) => f.id === ui.asId) || fam.find((f) => f.authorized) || fam[0];
   const patient = firstName(state.profile.name) || 'La persona';
@@ -898,13 +1215,9 @@ VIEWS.familiar = () => {
   if (!who.authorized) {
     return `${head}<div class="page">${note}${picker}<section class="card"><div class="empty">${I('lock')}<p><strong>${esc(patient)} no te ha autorizado.</strong><br>Para ver su información, ${esc(patient)} debe activarte en Mi perfil → Privacidad.</p></div></section></div>`;
   }
-  const rows = familyRows().map((r) => {
-    const tone = r.tone === 'lock' ? '' : r.tone;
-    return `<div class="item" style="align-items:flex-start"><span class="icon-bubble ${tone}" ${r.tone === 'lock' ? 'style="background:#EFE9DF;color:var(--ink2)"' : ''}>${I(r.icon)}</span><div class="grow"><div class="item-title" ${r.tone === 'lock' ? 'style="color:var(--ink2)"' : ''}>${esc(r.text)}</div>${r.sub ? `<div class="item-sub">${esc(r.sub)}</div>` : ''}${r.link ? `<a class="btn btn-soft btn-sm" style="margin-top:.4rem" href="${r.link}" target="_blank" rel="noopener">Ver en el mapa</a>` : ''}</div></div>`;
-  }).join('');
   const call = state.profile.phone ? `<a class="btn btn-primary btn-block btn-xl" style="margin-top:1rem" href="tel:${digits(state.profile.phone)}">${I('phone')} Llamar a ${esc(patient)}</a>` : '';
   return `${head}<div class="page">${note}${picker}
-    <section class="card"><div class="row" style="margin-bottom:.4rem">${avatar(state.profile.name, state.profile.photo, 'lg')}<div><div class="big-line" style="font-size:1.3rem">${esc(patient)} — Estado actual</div><div class="item-sub">${cap(fmt(new Date(), { weekday: 'long', day: 'numeric', month: 'long' }))}</div></div></div>${rows}</section>
+    <section class="card"><div class="row" style="margin-bottom:.4rem">${avatar(state.profile.name, state.profile.photo, 'lg')}<div><div class="big-line" style="font-size:1.3rem">${esc(patient)} — Estado actual</div><div class="item-sub">${cap(fmt(new Date(), { weekday: 'long', day: 'numeric', month: 'long' }))}</div></div></div>${rowsHtml(familyRows())}</section>
     ${call}
   </div>`;
 };
@@ -989,15 +1302,15 @@ function takeMed(id) {
 }
 function logout() { state.loggedOut = true; save(); showWelcome(); }
 async function resetAll() {
-  const ok = await ask({ title: '¿Borrar todos tus datos?', text: 'Se eliminarán medicinas, citas, familiares y alertas de este teléfono. No se puede deshacer.', ok: 'Sí, borrar todo', danger: true });
+  const ok = await ask({ title: '¿Borrar todos tus datos?', text: `Se eliminarán medicinas, citas, familiares y alertas de este teléfono${esAdulto() || esFamiliar() ? ' y también la conexión con tu familia en la nube' : ''}. No se puede deshacer.`, ok: 'Sí, borrar todo', danger: true });
   if (!ok) return;
-  try { localStorage.removeItem(KEY); } catch (e) { /* nada */ }
-  memoryOnly = null;
-  state = defaults();
-  document.documentElement.dataset.size = 'normal';
-  ui.view = 'inicio'; ui.mode = 'adulto';
-  scheduleReminders();
-  showWelcome();
+  try {
+    if (esAdulto()) await NUBE.rpc('adulto_borrar_familia', { p_llave: state.nube.llave });
+    else if (esFamiliar()) await NUBE.rpc('familiar_salir', { p_token: state.nube.token });
+  } catch (e) {
+    if (e && (e.code === 'red' || e.code === 'tiempo')) { toast('Sin internet: no se borró nada. Inténtalo con conexión para borrar también lo de la nube.', 'err'); return; }
+  }
+  limpiarTodo();
 }
 
 const ACTIONS = {
@@ -1018,7 +1331,7 @@ const ACTIONS = {
   askSOS: () => askSOS(),
   resolveAlert: (el) => {
     const a = state.alerts.find((x) => x.id === el.dataset.id); if (!a) return;
-    a.resolvedAt = new Date().toISOString(); save(); render(true); toast('Alerta cerrada. Me alegra que estés bien.', 'ok');
+    a.resolvedAt = new Date().toISOString(); save(); scheduleSync(0); render(true); toast('Alerta cerrada. Me alegra que estés bien.', 'ok');
   },
   shareLocationNow: () => shareLocationNow(),
   pickProfilePhoto: async () => { const p = await pickPhoto(); if (p) { state.profile.photo = p; save(); render(true); } },
@@ -1030,6 +1343,44 @@ const ACTIONS = {
     $('#fam-preview', form).innerHTML = avatar(form.elements['name'].value, p, 'xl');
   },
   setSize: (el) => { state.settings.size = el.dataset.size; document.documentElement.dataset.size = el.dataset.size; save(); render(true); },
+  crearFamilia: () => crearFamilia(),
+  joinFamily: () => joinSheet(),
+  reintentarNube: () => nubeKick(),
+  copiarCodigo: async () => {
+    try { await navigator.clipboard.writeText(fmtCodigo(state.nube.codigo)); toast('Código copiado.', 'ok'); }
+    catch (e) { toast('No pude copiarlo. Dícelo por mensaje o por teléfono.', 'err'); }
+  },
+  nuevoCodigo: async () => {
+    const ok = await ask({ title: '¿Cambiar el código?', text: 'El código anterior dejará de servir para personas nuevas. Quienes ya están conectados siguen igual.', ok: 'Sí, cambiarlo' });
+    if (!ok) return;
+    try { const r = await NUBE.rpc('adulto_nuevo_codigo', { p_llave: state.nube.llave }); state.nube.codigo = r.codigo; persist(); render(true); toast('Código nuevo listo.', 'ok'); }
+    catch (e) { toast(NUBE.errMsg(e), 'err'); }
+  },
+  quitarMiembro: async (el) => {
+    const m = ui.nube.miembros.find((x) => x.id === el.dataset.id); if (!m) return;
+    const ok = await ask({ title: `¿Quitar a ${m.nombre}?`, text: 'Dejará de ver tu información. Para volver tendría que pedir conectarse otra vez.', ok: 'Sí, quitar', danger: true });
+    if (!ok) return;
+    try { await NUBE.rpc('adulto_quitar_miembro', { p_llave: state.nube.llave, p_miembro: m.id }); ui.nube.miembros = ui.nube.miembros.filter((x) => x.id !== m.id); render(true); toast(`${m.nombre} ya no está conectado.`); }
+    catch (e) { toast(NUBE.errMsg(e), 'err'); }
+  },
+  desconectarNube: async () => {
+    const ok = await ask({ title: '¿Desconectar a tu familia?', text: 'Se borran de la nube tu resumen, tu ubicación y las conexiones. Tus datos en este teléfono se quedan.', ok: 'Sí, desconectar', danger: true });
+    if (!ok) return;
+    try { await NUBE.rpc('adulto_borrar_familia', { p_llave: state.nube.llave }); }
+    catch (e) { if (e && e.code !== 'llave_invalida') { toast(NUBE.errMsg(e), 'err'); return; } }
+    state.nube = defaults().nube; persist(); ui.nube.miembros = []; ui.nube.alertas = []; ui.nube.err = '';
+    render(true); toast('Tu familia se desconectó y se borraron tus datos de la nube.', 'ok');
+  },
+  familiarSalir: async () => {
+    const ok = await ask({ title: '¿Salir del panel familiar?', text: `Dejarás de ver a ${esc(state.nube.adulto || 'tu familiar')}. Para volver necesitarás un código.`, ok: 'Sí, salir', danger: true });
+    if (!ok) return;
+    try { await NUBE.rpc('familiar_salir', { p_token: state.nube.token }); } catch (e) { /* sin internet: igual se sale de este teléfono */ }
+    limpiarTodo();
+  },
+  atenderAlerta: async (el) => {
+    try { await NUBE.rpc('familiar_atender_alerta', { p_token: state.nube.token, p_alerta: el.dataset.id }); toast('Listo, avisamos que ya la viste.', 'ok'); nubeLeer(); }
+    catch (e) { toast(NUBE.errMsg(e), 'err'); }
+  },
   enterFamily: () => { ui.mode = 'familiar'; render(); },
   exitFamily: () => { ui.mode = 'adulto'; render(); },
   logout: () => logout(),
@@ -1067,6 +1418,14 @@ async function onSwitch(el) {
     f.authorized = on; save(); render(true);
     toast(on ? `${f.name} ahora puede ver tu información.` : `${f.name} ya no puede ver tu información.`);
     return;
+  }
+  if (id.startsWith('nube:')) {
+    const mid = id.slice(5), m = ui.nube.miembros.find((x) => x.id === mid);
+    try {
+      await NUBE.rpc('adulto_autorizar', { p_llave: state.nube.llave, p_miembro: mid, p_autorizado: on });
+      if (m) { m.autorizado = on; toast(on ? `${m.nombre} ahora puede ver tu información.` : `${m.nombre} ya no puede ver tu información.`); }
+    } catch (err) { toast(NUBE.errMsg(err), 'err'); }
+    render(true); return;
   }
   if (id === 'privacy.location') {
     if (on) {
@@ -1119,9 +1478,10 @@ function refreshLive() {
 function showApp() {
   $('#welcome').hidden = true;
   $('#app').hidden = false;
-  ui.mode = 'adulto';
+  ui.mode = esFamiliar() ? 'familiar' : 'adulto';
   render();
   scheduleReminders();
+  nubeKick();
 }
 function showWelcome() {
   const first = !state.onboarded;
@@ -1130,15 +1490,16 @@ function showWelcome() {
   w.hidden = false;
   w.innerHTML = `<div class="welcome-inner">
     <div class="welcome-logo">${LOGO}</div>
-    <h1>VidaMayor</h1>
+    <h1><span class="w-vida">Vida</span><span class="w-mayor">Mayor</span></h1>
     <p class="tag">Tus medicinas, tus citas y tu familia, siempre a la mano.</p>
     ${first
       ? `<label class="field"><span>¿Cómo te llamas?</span><input id="welcome-name" class="input" type="text" placeholder="Ej. María" autocomplete="given-name" value="${esc(state.profile.name)}"></label>
          <button class="btn btn-primary btn-block btn-xl" data-act="startDemo">Comenzar con datos de ejemplo</button>
-         <button class="btn btn-line btn-block btn-xl" data-act="startEmpty">Comenzar desde cero</button>`
-      : `<p class="lead" style="margin-top:1.3rem">Hola de nuevo${firstName(state.profile.name) ? `, <strong>${esc(firstName(state.profile.name))}</strong>` : ''}.</p>
+         <button class="btn btn-line btn-block btn-xl" data-act="startEmpty">Comenzar desde cero</button>
+         <button class="btn btn-soft btn-block btn-xl" data-act="joinFamily">Soy familiar · tengo un código</button>`
+      : `<p class="lead" style="margin-top:1.3rem">Hola de nuevo${firstName(esFamiliar() ? state.nube.nombre : state.profile.name) ? `, <strong>${esc(firstName(esFamiliar() ? state.nube.nombre : state.profile.name))}</strong>` : ''}.</p>
          <button class="btn btn-primary btn-block btn-xl" data-act="enter">Entrar</button>`}
-    <p class="small muted" style="margin-top:1.3rem">Versión de demostración: tus datos se guardan solo en este teléfono.</p>
+    <p class="small muted" style="margin-top:1.3rem">${nubeOn() ? 'Tus datos se guardan en este teléfono. Solo si conectas a tu familia se comparte un resumen del día con quien tú autorices.' : 'Versión de demostración: tus datos se guardan solo en este teléfono.'}</p>
   </div>`;
 }
 function startApp(demo) {
@@ -1156,6 +1517,7 @@ function setupNative() {
   if (App && App.addListener) {
     App.addListener('backButton', () => {
       if (sheet.open) closeSheet();
+      else if (esFamiliar()) { if (App.exitApp) App.exitApp(); }
       else if (ui.mode === 'familiar') { ui.mode = 'adulto'; render(); }
       else if (ui.view !== 'inicio') go(MAIN.includes(ui.view) ? 'inicio' : (ui.prev || 'inicio'));
       else if (App.exitApp) App.exitApp();
@@ -1174,7 +1536,8 @@ function boot() {
   if (!state.onboarded || state.loggedOut) showWelcome(); else showApp();
   setupNative();
   setInterval(() => { if (!document.hidden) { tickDue(); refreshLive(); } }, 30000);
-  document.addEventListener('visibilitychange', () => { if (!document.hidden) { tickDue(); refreshLive(); scheduleReminders(); } });
+  setInterval(nubeTick, 6000);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) { tickDue(); refreshLive(); scheduleReminders(); nubeKick(); } });
 }
 boot();
 })();

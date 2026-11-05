@@ -73,7 +73,7 @@ a { color: var(--primary-d); font-weight: 700; }
   -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px);
 }
 .brand { flex: 1; display: flex; align-items: center; gap: .5rem; font-weight: 800; font-size: 1.1rem; color: var(--primary-d); }
-.brand svg { width: 2.1rem; height: 2.1rem; }
+.brand .logo-img { height: 2.4rem; width: auto; display: block; }
 .top-title { flex: 1; font-size: 1.3rem; line-height: 1.2; }
 .top-actions { display: flex; align-items: center; gap: .35rem; }
 .icon-btn { position: relative; width: 3rem; height: 3rem; border-radius: 50%; display: grid; place-items: center; background: var(--surface); box-shadow: var(--shadow); color: var(--ink); }
@@ -265,8 +265,10 @@ textarea.input { min-height: 6rem; resize: vertical; }
 /* ───────── Bienvenida ───────── */
 .welcome { position: fixed; inset: 0; z-index: 40; background: var(--bg); overflow-y: auto; display: flex; }
 .welcome-inner { margin: auto; width: 100%; max-width: 460px; padding: calc(var(--sat) + 1.5rem) 1.4rem calc(var(--sab) + 1.5rem); text-align: center; }
-.welcome-logo svg { width: 6.5rem; height: 6.5rem; filter: drop-shadow(0 10px 18px rgba(46, 125, 116, .3)); }
-.welcome h1 { font-size: 2.3rem; font-weight: 900; color: var(--primary-d); margin-top: .8rem; letter-spacing: -.02em; }
+.welcome-logo .logo-img { width: min(72%, 15rem); height: auto; display: block; margin: 0 auto; }
+.welcome h1 { font-size: 2.5rem; font-weight: 900; margin-top: .6rem; letter-spacing: -.02em; }
+.welcome h1 .w-vida { color: #002142; }
+.welcome h1 .w-mayor { color: #7f7e81; }
 .welcome .tag { color: var(--ink2); margin-top: .4rem; font-size: 1.05rem; }
 .welcome .field { text-align: left; margin-top: 1.4rem; }
 .welcome .btn { margin-top: .75rem; }
@@ -278,3 +280,7 @@ textarea.input { min-height: 6rem; resize: vertical; }
 .family-row { display: flex; align-items: center; gap: .8rem; }
 .empty { text-align: center; color: var(--ink2); padding: 1.2rem .5rem; }
 .empty .ico { width: 2.4rem; height: 2.4rem; color: #B8AD9C; margin-bottom: .3rem; }
+
+/* ── Familia conectada ── */
+.code-box { margin-top: .7rem; text-align: center; font-size: clamp(1.5rem, 8.2vw, 2.1rem); white-space: nowrap; font-weight: 900; letter-spacing: .12em; color: var(--primary-d); background: var(--primary-l); border-radius: 18px; padding: .8rem .4rem; user-select: all; }
+input[name="codigo"] { text-transform: uppercase; letter-spacing: .12em; }
